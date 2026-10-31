@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import client  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-BINARY = Path(os.environ.get("SERVER_BINARY", str(ROOT / "serverside-generative")))
+BINARY = Path(os.environ.get("SERVER_BINARY", str(ROOT / "serverside")))
 PASSWORD = "integration-test-password-1234"
 
 
@@ -68,7 +68,15 @@ class ServerRunner:
                 sock = socket.create_connection(("127.0.0.1", self.tcp_port), timeout=.15)
                 sock.close()
                 if self.ipc.exists():
-                    return
+                    # TCP can be ready before the HTTP/WS handshake listener.
+                    try:
+                        check = socket.create_connection(("127.0.0.1", self.http_port), timeout=.15)
+                    except OSError:
+                        time.sleep(.06)
+                        continue
+                    else:
+                        check.close()
+                        return
             except (ConnectionError, OSError):
                 time.sleep(.06)
         raise TimeoutError("Server failed to start")

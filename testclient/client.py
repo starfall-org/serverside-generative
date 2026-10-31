@@ -3,7 +3,7 @@
 
 Usage:
   python3 testclient/client.py pair --method http --url http://127.0.0.1:7091 --password 'long-secret' --state /tmp/client.json
-  python3 testclient/client.py pair --method ssh --ssh-command './serverside-generative handshake --stdio' --state /tmp/client.json
+  python3 testclient/client.py pair --method ssh --ssh-command './serverside handshake --stdio' --state /tmp/client.json
   python3 testclient/client.py pair --method human --invite 'generative://pair?...' --state /tmp/client.json
   python3 testclient/client.py demo --state /tmp/client.json --session test-1 --text hello --delay-ms 350
 """
@@ -339,6 +339,74 @@ def demo(state: dict[str, Any], session_id: str, text: str, delay_ms: int = 350)
         sock.close()
 
 
+
+def run_remote(
+    auth: dict[str, Any],
+    config: dict[str, Any],
+    session_id: str,
+    kind: str,
+    mcp_server: str = "",
+    mcp_tool: str = "",
+    arguments: dict[str, Any] | None = None,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """Start real remote execution, close Android connection, then reconnect to resync.
+
+    This standalone smoke-test client prints output but deliberately does not ACK:
+    a real Android client ACKs only after the event is committed to its local DB.
+    """
+    request_id = "job-" + secrets.token_hex(8)
+    sock = reconnect(auth)
+    try:
+        write_frame(sock, {"type": "handoff", "session_id": session_id,
+                           "revision": time.time_ns(), "state": config})
+        reply = read_frame(sock)
+        if reply.get("type") != "handoff_ack":
+            raise RuntimeError(f"handoff rejected: {reply}")
+        if kind == "model":
+            request = {"type": "start", "kind": "model"}
+        elif kind == "mcp-list":
+            request = {"type": "mcp_list", "mcp_server": mcp_server}
+        elif kind == "mcp-call":
+            request = {"type": "mcp_call", "mcp_server": mcp_server,
+                       "mcp_tool": mcp_tool, "arguments": arguments or {}}
+        else:
+            raise ValueError("unsupported run mode")
+        request.update({"session_id": session_id, "request_id": request_id})
+        write_frame(sock, request)
+        reply = read_frame(sock)
+        if reply.get("type") != "start_ack":
+            raise RuntimeError(f"remote job rejected: {reply}")
+    finally:
+        sock.close()
+
+    # Server continues after the first connection is closed.
+    sock = reconnect(auth)
+    sock.settimeout(timeout)
+    seen: list[dict[str, Any]] = []
+    try:
+        write_frame(sock, {"type": "sync", "session_id": session_id, "since": 0})
+        reply = read_frame(sock)
+        if reply.get("type") != "sync_begin":
+            raise RuntimeError(f"sync failed: {reply}")
+        while True:
+            item = read_frame(sock)
+            if item.get("type") == "event" and item.get("request_id") == request_id:
+                seen.append(item)
+                if item.get("event") in ("completed", "error"):
+                    break
+            elif item.get("type") == "error":
+                raise RuntimeError(f"sync failed: {item.get('message')}")
+        if seen[-1]["event"] != "completed":
+            raise RuntimeError("remote execution failed; provider errors are not echoed to protect credentials")
+        return {"session_id": session_id, "events": len(seen),
+                "text": "".join(e.get("content", "") for e in seen if e.get("event") == "delta"),
+                "tools": [json.loads(e["content"]) for e in seen if e.get("event") == "mcp_tools"],
+                "tool_results": [json.loads(e["content"]) for e in seen if e.get("event") == "mcp_result"]}
+    finally:
+        sock.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest="command", required=True)
@@ -359,6 +427,15 @@ def main() -> None:
     d.add_argument("--session", default="demo-1")
     d.add_argument("--text", default="Hello from the memory-only runtime.")
     d.add_argument("--delay-ms", type=int, default=350)
+    work = subs.add_parser("run", help="Run real provider/MCP SDK calls from a JSON session config")
+    work.add_argument("--state", type=Path, default=Path("testclient-state.json"))
+    work.add_argument("--config", type=Path, required=True, help="Session JSON containing provider/API/MCP settings")
+    work.add_argument("--session", default="api-test-session")
+    work.add_argument("--kind", choices=("model", "mcp-list", "mcp-call"), default="model")
+    work.add_argument("--mcp-server", default="")
+    work.add_argument("--mcp-tool", default="")
+    work.add_argument("--arguments-file", type=Path)
+    work.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args()
     if args.command == "pair":
         if args.method == "http":
@@ -378,9 +455,15 @@ def main() -> None:
         state = pair(invite, args.state)
         print(json.dumps({"paired": True, "method": channel, "endpoint": state["endpoint"],
                           "tls_fingerprint": state["fingerprint"], "state_file": str(args.state)}))
-    else:
+    elif args.command == "demo":
         state = json.loads(args.state.read_text())
         print(json.dumps(demo(state, args.session, args.text, args.delay_ms), ensure_ascii=False))
+    else:
+        auth = json.loads(args.state.read_text())
+        config = json.loads(args.config.read_text())
+        arguments = json.loads(args.arguments_file.read_text()) if args.arguments_file else {}
+        print(json.dumps(run_remote(auth, config, args.session, args.kind, args.mcp_server,
+                                    args.mcp_tool, arguments, args.timeout), ensure_ascii=False))
 
 
 if __name__ == "__main__":

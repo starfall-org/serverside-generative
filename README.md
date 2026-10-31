@@ -2,7 +2,7 @@
 
 A self-hosted, **memory-only session runtime** for Generative Android. Single-file Go CLI binary at deployment time; no Go toolchain, database, Firebase, broker, or permanent session storage is required.
 
-> **Current status: transport + pairing + replay MVP.** The server has a deliberately small *test-only echo runtime*. It does **not** yet invoke real AI providers, MCP servers, or Android tools. Do not treat it as a finished remote execution feature.
+> **Current status: Go SDK-backed remote execution alpha.** The server can stream text from OpenAI Responses, OpenAI Chat Completions (including compatible endpoints), Google Gemini, and Anthropic Claude, and can explicitly list/call Streamable HTTP MCP tools. It does **not** yet support autonomous model tool loops, Android integration, multimodal requests, or NAT hole punching.
 
 ## Architecture
 
@@ -20,17 +20,17 @@ A self-hosted, **memory-only session runtime** for Generative Android. Single-fi
 
 ## Install (no Go required on the server)
 
-Download the prebuilt `serverside-generative` CLI for your OS/CPU from the repository CI artifacts or a tagged release. On Linux:
+Download the prebuilt `serverside` CLI for your OS/CPU from the repository CI artifacts or a tagged release. On Linux:
 
 ```bash
-chmod +x serverside-generative
-./serverside-generative version
+chmod +x serverside
+./serverside version
 ```
 
-To build **as a developer**, install Go 1.25+ and run:
+To build **as a developer**, install Go 1.26.10+ and run:
 
 ```bash
-go build -trimpath -ldflags='-s -w' -o serverside-generative ./cmd/serverside-generative
+go build -trimpath -ldflags='-s -w' -o serverside ./cmd/serverside-generative
 ```
 
 ### Start the server
@@ -39,14 +39,14 @@ For local experimentation:
 
 ```bash
 export GENERATIVE_HANDSHAKE_PASSWORD='replace-with-a-long-random-password'
-./serverside-generative serve --human
+./serverside serve --human
 ```
 
 For another device on a reachable network:
 
 ```bash
 export GENERATIVE_HANDSHAKE_PASSWORD='replace-with-a-long-random-password'
-./serverside-generative serve \
+./serverside serve \
   --tcp-listen 0.0.0.0:7090 \
   --advertise server.example.com:7090 \
   --http-listen 127.0.0.1:7091 \
@@ -73,7 +73,7 @@ The client uses a previously trusted SSH host and public-key login; the SSH sess
 
 ```bash
 ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes user@server \
-  serverside-generative handshake --stdio
+  serverside handshake --stdio
 ```
 
 The response is a short-lived JSON invitation. SSH can close immediately; the client uses its ticket to establish the **separate direct TLS/TCP** transport. The server runs no embedded SSH daemon; install/configure OpenSSH and authorized keys separately. Without a reachable SSH path, this handshake cannot work.
@@ -104,9 +104,9 @@ For remote clients, use HTTPS / WSS with a certificate verified by the client. P
 ### 3. Human Relay (QR / manual PIN, no HTTP or SSH)
 
 ```bash
-./serverside-generative serve --human --http-listen off
+./serverside serve --human --http-listen off
 # Any time afterwards, print a fresh 2-minute invite:
-./serverside-generative pair
+./serverside pair
 ```
 
 The terminal displays a QR encoding `generative://pair?endpoint=...&ticket=...&fingerprint=...`. If the client cannot scan, manually enter the endpoint, **12-digit one-time PIN**, and TLS fingerprint displayed in the terminal. The QR ticket and PIN expire in 2 minutes and are single-use.
@@ -134,8 +134,76 @@ The test client requires **Python 3.10+ standard library only**. To run the full
 
 ```bash
 go test ./...
-python3 -m unittest discover -s testclient -p test_integration.py -v
+python3 -m unittest discover -s testclient -p 'test_*.py' -v
 ```
+
+## Real API execution with official Go SDKs
+
+Model adapters import and call the official Go SDKs:
+
+| Platform | Go package | In-memory provider platform |
+| --- | --- | --- |
+| OpenAI Responses | [openai-go/v3](https://github.com/openai/openai-go) | `openai-responses` |
+| OpenAI Chat Completions | [openai-go/v3](https://github.com/openai/openai-go) | `openai-chat` |
+| Anthropic Claude | [anthropic-sdk-go/v2](https://github.com/anthropics/anthropic-sdk-go) | `anthropic` |
+| Google Gemini Developer API | [google.golang.org/genai](https://github.com/googleapis/go-genai) | `gemini` |
+| MCP Streamable HTTP | [modelcontextprotocol/go-sdk](https://github.com/modelcontextprotocol/go-sdk) | `mcp` array |
+
+Only `openai-chat` offers OpenAI-compatible non-OpenAI providers via a custom `base_url` (not all vendors are truly compatible). Select models explicitly; the server never hardcodes a default model or API key.
+
+**Handoff example (`runtime.json`, created locally on the client for testing):**
+
+```json
+{
+  "provider": {
+    "platform": "openai-responses",
+    "api_key": "YOUR_API_KEY",
+    "model": "YOUR_MODEL_NAME",
+    "max_tokens": 4096
+  },
+  "conversation": [
+    {"role": "system", "content": "You are helpful."},
+    {"role": "user", "content": "Continue this conversation."}
+  ],
+  "mcp": [
+    {
+      "id": "tools",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {"Authorization": "Bearer MCP_CREDENTIAL"}
+    }
+  ]
+}
+```
+
+The Android client should construct this JSON **in RAM** from the currently active providers/MCP servers. Do not save keys in a permanent server file. The Python smoke client intentionally accepts a file for testing only; protect/delete that local file.
+
+After pairing the Python client, run a real model request:
+
+```bash
+python3 testclient/client.py run \
+  --state client-state.json \
+  --config runtime.json \
+  --kind model --session chat-123
+```
+
+The Python client sends the session state over pinned TLS, starts the job, **disconnects**, reconnects, and waits for streaming output. It deliberately does not ACK the events because merely printing text to stdout is not a durable client-side commit.
+
+Query the MCP tools explicitly:
+
+```bash
+python3 testclient/client.py run --state client-state.json \
+  --config runtime.json --kind mcp-list --mcp-server tools
+```
+
+Call an MCP tool only after the user has authorized it. Supply arguments in an object JSON file:
+
+```bash
+python3 testclient/client.py run --state client-state.json \
+  --config runtime.json --kind mcp-call --mcp-server tools \
+  --mcp-tool example_tool --arguments-file arguments.json
+```
+
+The model SDK adapters currently support **text streaming only**; model tool calls and MCP execution are separate. An MCP tool is **never automatically executed by model output**. MCP Streamable HTTP is supported; local stdio processes and OAuth flows are not yet implemented. Both HTTP provider endpoints and MCP endpoints require HTTPS, except for literal loopback hosts in development.
 
 ## Framed data protocol v1
 
@@ -152,7 +220,10 @@ Additional messages:
 | Client message | Server message | Purpose |
 | --- | --- | --- |
 | `handoff {session_id, revision, state}` | `handoff_ack` | Replace in-memory state with strictly increasing revision |
-| `start {session_id, request_id, kind:"echo", content, delay_ms}` | `start_ack` | Test-only async job, idempotent by request ID |
+| `start {session_id, request_id, kind:"echo", content, delay_ms}` | `start_ack` | Test-only async echo job, idempotent by request ID |
+| `start {session_id, request_id, kind:"model"}` | `start_ack`, then `event` | Run provider SDK in background using RAM-only handoff state |
+| `mcp_list {session_id, request_id, mcp_server}` | `start_ack`, then `mcp_tools` event | List available MCP tools with official SDK |
+| `mcp_call {session_id, request_id, mcp_server, mcp_tool, arguments}` | `start_ack`, then `mcp_result` event | Explicitly call authorized MCP tool |
 | `sync {session_id, since}` | `sync_begin`, `event*`, `sync_end` | Replay events then continuously subscribe |
 | `ack {session_id, seq}` | `ack_ok` | Release events **after** local durable write |
 | `status {session_id}` | `status` | Inspect active in-RAM job/event counts |
@@ -163,9 +234,11 @@ Each payload is prefixed by a **4-byte unsigned big-endian byte length**. Creden
 
 ## Limitations / next steps
 
-- This MVP has no real model/API/MCP executor. Only the simulated `echo` kind proves handoff and RAM replay.
+- The API/MCP SDK adapters are functional, but only text-generation and explicit MCP calls are implemented; no automatic model tool-use loop, local MCP stdio command execution, or file/multimodal inputs yet.
 - TCP hole punching and address discovery remain separate work. Neither HTTP, SSH nor QR signaling alone removes the requirement for a reachable data endpoint.
 - No persistent event recovery after server restart. A client must resend the context from its own database.
 - Current in-memory limits are 128 sessions, 2 MiB state per session and 2,048 retained events per session; overflow yields `sync_gap`.
 - A real Android client should persist reconnect secrets in Android Keystore-backed storage, and release Temporary Chats without handing them off.
 - Credential revocation should be enforced across already-active connections as this project evolves.
+- SDK/network errors are intentionally redacted to a generic `remote_execution_failed` event to avoid leaking API credentials or sensitive response metadata. More detailed safe error classes are future work.
+- SDK dependencies may increase binary size; CI builds standalone binaries without requiring a Go installation on the deployment server.

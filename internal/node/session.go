@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/starfall-org/serverside-generative/internal/execution"
 )
 
 const maxEvents = 2048
@@ -165,12 +167,42 @@ func (s *Session) Status() map[string]any {
 	defer s.mu.Unlock()
 	return map[string]any{"type": "status", "session_id": s.ID, "revision": s.Revision, "last_seq": s.NextSeq, "pending_events": len(s.Events), "active_jobs": len(s.Jobs)}
 }
-func (s *Session) Start(requestID, kind, content string, delayMS int) error {
+func (s *Session) BeginJob(requestID string, configCheck func(json.RawMessage) error) (context.Context, json.RawMessage, bool, error) {
 	if err := validateID(requestID); err != nil {
-		return err
+		return nil, nil, false, err
 	}
-	if kind != "echo" {
-		return errors.New("unsupported test runtime kind (only echo is implemented)")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Started[requestID] {
+		return nil, nil, true, nil
+	}
+	state := append(json.RawMessage(nil), s.State...)
+	if configCheck != nil {
+		if err := configCheck(state); err != nil {
+			return nil, nil, false, err
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.Started[requestID] = true
+	s.Jobs[requestID] = cancel
+	return ctx, state, false, nil
+}
+func (s *Session) FinishJob(requestID string, err error) {
+	if err != nil {
+		s.Publish(requestID, "error", "remote_execution_failed")
+	} else {
+		s.Publish(requestID, "completed", "")
+	}
+	s.mu.Lock()
+	if cancel, ok := s.Jobs[requestID]; ok {
+		cancel()
+		delete(s.Jobs, requestID)
+	}
+	s.mu.Unlock()
+}
+func (s *Session) Start(requestID, kind, content string, delayMS int) error {
+	if kind != "echo" && kind != "model" {
+		return errors.New("unsupported execution kind")
 	}
 	if len(content) > 64*1024 {
 		return errors.New("text too large")
@@ -178,31 +210,60 @@ func (s *Session) Start(requestID, kind, content string, delayMS int) error {
 	if delayMS < 0 || delayMS > 30000 {
 		return errors.New("invalid delay_ms")
 	}
-	s.mu.Lock()
-	if s.Started[requestID] {
-		s.mu.Unlock()
+	var model execution.State
+	check := func(raw json.RawMessage) error {
+		if kind == "echo" {
+			return nil
+		}
+		if err := json.Unmarshal(raw, &model); err != nil {
+			return errors.New("missing or invalid model state")
+		}
+		return model.ValidateModel()
+	}
+	ctx, _, duplicate, err := s.BeginJob(requestID, check)
+	if err != nil {
+		return err
+	}
+	if duplicate {
 		return nil
-	} // Idempotent execution.
-	ctx, cancel := context.WithCancel(context.Background())
-	s.Started[requestID] = true
-	s.Jobs[requestID] = cancel
-	s.mu.Unlock()
+	}
 	go func() {
-		defer cancel()
-		defer func() { s.mu.Lock(); delete(s.Jobs, requestID); s.mu.Unlock() }()
+		var jobErr error
+		defer func() { s.FinishJob(requestID, jobErr) }()
+		if kind == "model" {
+			jobErr = execution.Stream(ctx, model, func(delta string) {
+				if ctx.Err() != nil {
+					return
+				}
+				// Preserve stream events for reconnect, bounded by the event buffer.
+				for len(delta) > 0 {
+					n := len(delta)
+					if n > 12*1024 {
+						n = 12 * 1024
+					}
+					// Avoid breaking UTF-8 if a provider emits a large chunk.
+					for n < len(delta) && !utf8.ValidString(delta[:n]) {
+						n++
+					}
+					s.Publish(requestID, "delta", delta[:n])
+					delta = delta[n:]
+				}
+			})
+			return
+		}
 		if delayMS > 0 {
 			select {
 			case <-ctx.Done():
+				jobErr = ctx.Err()
 				return
 			case <-time.After(time.Duration(delayMS) * time.Millisecond):
 			}
 		}
 		runes := []rune(content)
 		for len(runes) > 0 {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
+				jobErr = ctx.Err()
 				return
-			default:
 			}
 			n := len(runes)
 			if n > 12 {
@@ -212,11 +273,46 @@ func (s *Session) Start(requestID, kind, content string, delayMS int) error {
 			runes = runes[n:]
 			select {
 			case <-ctx.Done():
+				jobErr = ctx.Err()
 				return
 			case <-time.After(15 * time.Millisecond):
 			}
 		}
-		s.Publish(requestID, "completed", "")
+	}()
+	return nil
+}
+func (s *Session) StartMCP(requestID, serverID, toolName string, args json.RawMessage, list bool) error {
+	var state execution.State
+	check := func(raw json.RawMessage) error {
+		if err := json.Unmarshal(raw, &state); err != nil {
+			return errors.New("missing or invalid MCP state")
+		}
+		return state.ValidateMCP(serverID)
+	}
+	ctx, _, duplicate, err := s.BeginJob(requestID, check)
+	if err != nil {
+		return err
+	}
+	if duplicate {
+		return nil
+	}
+	go func() {
+		var runErr error
+		defer func() { s.FinishJob(requestID, runErr) }()
+		var result json.RawMessage
+		if list {
+			result, runErr = execution.ListTools(ctx, state, serverID)
+		}
+		if !list {
+			result, runErr = execution.CallTool(ctx, state, serverID, toolName, args)
+		}
+		if runErr == nil {
+			if list {
+				s.Publish(requestID, "mcp_tools", string(result))
+			} else {
+				s.Publish(requestID, "mcp_result", string(result))
+			}
+		}
 	}()
 	return nil
 }

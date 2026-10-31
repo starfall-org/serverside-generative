@@ -28,7 +28,7 @@ func main() {
 	}
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "serverside-generative: memory-only session runtime")
+	fmt.Fprintln(os.Stderr, "serverside: memory-only session runtime")
 	fmt.Fprintln(os.Stderr, "Commands: serve, handshake --stdio, pair, version")
 }
 func defaultIPC() string {
@@ -51,7 +51,7 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "version":
-		fmt.Println("serverside-generative", version)
+		fmt.Println("serverside", version)
 		return nil
 	case "handshake", "ticket", "pair":
 		fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
@@ -151,7 +151,7 @@ func run(args []string) error {
 		fmt.Println("Data transport (TLS 1.3):", listener.Addr().String())
 		fmt.Println("Advertised endpoint:     ", ep)
 		fmt.Println("Server TLS fingerprint:  ", n.Fingerprint)
-		fmt.Println("SSH handshake command:    ssh -T USER@HOST serverside-generative handshake --stdio")
+		fmt.Println("SSH handshake command:    ssh -T USER@HOST serverside handshake --stdio")
 		fmt.Println("Pairing control socket:  ", sock)
 		fmt.Println("All chat/session/API/MCP contents remain in RAM.")
 		if *human {

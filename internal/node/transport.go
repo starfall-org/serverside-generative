@@ -32,6 +32,9 @@ type Message struct {
 	Kind      string          `json:"kind,omitempty"`
 	Content   string          `json:"content,omitempty"`
 	DelayMS   int             `json:"delay_ms,omitempty"`
+	MCPServer string          `json:"mcp_server,omitempty"`
+	MCPTool   string          `json:"mcp_tool,omitempty"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 type peer struct {
 	conn     net.Conn
@@ -154,6 +157,16 @@ func (n *Node) handleTCP(conn net.Conn) {
 			s, err := n.getSession(id, msg.SessionID, false)
 			if err == nil {
 				err = s.Start(msg.RequestID, msg.Kind, msg.Content, msg.DelayMS)
+			}
+			if err != nil {
+				p.error(err)
+				continue
+			}
+			_ = p.send(map[string]any{"type": "start_ack", "session_id": msg.SessionID, "request_id": msg.RequestID})
+		case "mcp_list", "mcp_call":
+			s, err := n.getSession(id, msg.SessionID, false)
+			if err == nil {
+				err = s.StartMCP(msg.RequestID, msg.MCPServer, msg.MCPTool, msg.Arguments, msg.Type == "mcp_list")
 			}
 			if err != nil {
 				p.error(err)
