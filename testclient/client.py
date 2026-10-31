@@ -82,7 +82,62 @@ def read_frame(sock: socket.socket) -> dict[str, Any]:
     return json.loads(recv_exact(sock, size))
 
 
-def auth_socket(invite: dict[str, Any], creds: dict[str, Any] | None = None) -> tuple[ssl.SSLSocket, dict[str, Any]]:
+def context_snapshot(creds: dict[str, Any] | None = None, override: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    if override is not None:
+        return override
+    if creds and creds.get("context_file"):
+        return json.loads(Path(creds["context_file"]).read_text(encoding="utf-8"))
+    return None
+
+
+def context_digest(config: dict[str, Any]) -> str:
+    # Match Go's field order and omitempty conventions for the typed, nonsecret schema.
+    skills = config.get("skills")
+    normalized: dict[str, Any] = {
+        "instructions": config.get("instructions") or "",
+        "skills": None if skills is None else [
+            {
+                "id": item["id"], "name": item["name"],
+                **({"description": item["description"]} if item.get("description") else {}),
+                "content": item.get("content") or "",
+            } for item in skills
+        ],
+    }
+    providers = config.get("providers") or []
+    if providers:
+        normalized["providers"] = [
+            {
+                "id": item["id"], "name": item["name"],
+                "platform": item["platform"],
+                **({"base_url": item["base_url"]} if item.get("base_url") else {}),
+                **({"models": item["models"]} if item.get("models") else {}),
+            } for item in providers
+        ]
+    raw = json.dumps(normalized, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    # encoding/json escapes HTML special characters in string literals.
+    raw = raw.replace(b"<", b"\\u003c").replace(b">", b"\\u003e").replace(b"&", b"\\u0026")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def update_client_sync_state(
+    creds: dict[str, Any] | None, revision: int, digest: str,
+    local_digest: str | None,
+) -> None:
+    if creds is None:
+        return
+    creds["last_shared_revision"] = revision
+    creds["last_synced_digest"] = digest
+    creds["last_local_digest"] = local_digest
+    path = creds.get("_state_path")
+    if path:
+        save_state(Path(path), {k: v for k, v in creds.items() if not k.startswith("_")})
+
+
+def auth_socket(
+    invite: dict[str, Any],
+    creds: dict[str, Any] | None = None,
+    context_override: dict[str, Any] | None = None,
+) -> tuple[ssl.SSLSocket, dict[str, Any]]:
     sock = secure_socket(invite["endpoint"], invite["fingerprint"])
     if creds:
         auth = {"type": "auth", "client_id": creds["client_id"], "secret": creds["secret"]}
@@ -99,11 +154,55 @@ def auth_socket(invite: dict[str, Any], creds: dict[str, Any] | None = None) -> 
         result = read_frame(sock)
         if result.get("type") != "paired":
             raise RuntimeError(f"Pairing failed: {result}")
+        if result.get("protocol") != 4:
+            raise RuntimeError(f"Unsupported server protocol: {result.get('protocol')}")
+        local = context_snapshot(creds, context_override)
+        local_hash = context_digest(local) if local is not None else None
+        server_revision = result["shared_revision"]
+        server_digest = result["context_digest"]
+        last_server = (creds or {}).get("last_synced_digest")
+        last_local = (creds or {}).get("last_local_digest")
+        if local is None:
+            # Read shared state without modifying it.
+            write_frame(sock, {"type": "context_get"})
+            ack = read_frame(sock)
+        elif local_hash == server_digest:
+            write_frame(sock, {"type": "context_sync",
+                               "revision": server_revision, "digest": server_digest})
+            ack = read_frame(sock)
+        elif server_revision == 0 or (last_server == server_digest and last_local != local_hash):
+            # Local edits based on the server's last known state.
+            write_frame(sock, {"type": "context_update",
+                               "revision": server_revision, "context": local})
+            ack = read_frame(sock)
+        elif last_local == local_hash:
+            # Server changed, but local file did not. Adopt remote state.
+            write_frame(sock, {"type": "context_get"})
+            ack = read_frame(sock)
+            if ack.get("type") == "context_state" and creds and creds.get("context_file"):
+                save_state(Path(creds["context_file"]), ack["context"])
+                local_hash = context_digest(ack["context"])
+        else:
+            raise RuntimeError(
+                "Shared configuration conflict: both server and local file changed; "
+                "resolve explicitly rather than overwriting either copy"
+            )
+        if ack.get("type") not in ("context_ack", "context_state"):
+            raise RuntimeError(f"Shared configuration sync failed: {ack}")
+        revision = ack.get("revision", server_revision)
+        digest = ack.get("digest", server_digest)
+        if ack.get("type") == "context_state":
+            result["shared_context"] = ack["context"]
+            if local is None:
+                local_hash = None
+        update_client_sync_state(creds, revision, digest, local_hash)
+        result["shared_revision"] = revision
+        result["context_digest"] = digest
+        result["last_local_digest"] = local_hash
         return sock, result
     except BaseException:
         sock.close()
         raise
-
 
 def _is_loopback(url: str) -> bool:
     host = (urllib.parse.urlparse(url).hostname or "").lower()
@@ -266,10 +365,11 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def pair(invitation: dict[str, Any], path: Path) -> dict[str, Any]:
+def pair(invitation: dict[str, Any], path: Path, context_file: Path | None = None) -> dict[str, Any]:
     if invitation.get("expires") and invitation["expires"] <= time.time():
         raise ValueError("Pairing invitation expired")
-    sock, result = auth_socket(invitation)
+    bootstrap = {"context_file": str(context_file.resolve())} if context_file is not None else {}
+    sock, result = auth_socket(invitation, context_override=context_snapshot(bootstrap))
     sock.close()
     if "secret" not in result:
         raise RuntimeError("Server did not return initial reconnect credentials")
@@ -278,13 +378,18 @@ def pair(invitation: dict[str, Any], path: Path) -> dict[str, Any]:
         "fingerprint": invitation["fingerprint"],
         "client_id": result["client_id"],
         "secret": result["secret"],
+        "last_shared_revision": result["shared_revision"],
+        "last_synced_digest": result["context_digest"],
+        "last_local_digest": result.get("last_local_digest"),
     }
+    if context_file is not None:
+        state["context_file"] = str(context_file.resolve())
     save_state(path, state)
     return state
 
 
-def reconnect(state: dict[str, Any]) -> ssl.SSLSocket:
-    sock, _ = auth_socket(state, state)
+def reconnect(state: dict[str, Any], context_override: dict[str, Any] | None = None) -> ssl.SSLSocket:
+    sock, _ = auth_socket(state, state, context_override)
     return sock
 
 
@@ -422,6 +527,7 @@ def main() -> None:
     p.add_argument("--endpoint")
     p.add_argument("--fingerprint")
     p.add_argument("--pin")
+    p.add_argument("--context-file", type=Path, help="Non-secret instructions/Agent Skills JSON to upload on each reconnect")
     d = subs.add_parser("demo")
     d.add_argument("--state", type=Path, default=Path("testclient-state.json"))
     d.add_argument("--session", default="demo-1")
@@ -452,14 +558,16 @@ def main() -> None:
         else:
             invite = handshake_human(args.invite, args.endpoint, args.fingerprint, args.pin)
             channel = "human"
-        state = pair(invite, args.state)
+        state = pair(invite, args.state, args.context_file)
         print(json.dumps({"paired": True, "method": channel, "endpoint": state["endpoint"],
                           "tls_fingerprint": state["fingerprint"], "state_file": str(args.state)}))
     elif args.command == "demo":
         state = json.loads(args.state.read_text())
+        state["_state_path"] = str(args.state)
         print(json.dumps(demo(state, args.session, args.text, args.delay_ms), ensure_ascii=False))
     else:
         auth = json.loads(args.state.read_text())
+        auth["_state_path"] = str(args.state)
         config = json.loads(args.config.read_text())
         arguments = json.loads(args.arguments_file.read_text()) if args.arguments_file else {}
         print(json.dumps(run_remote(auth, config, args.session, args.kind, args.mcp_server,

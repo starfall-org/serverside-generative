@@ -200,7 +200,7 @@ func (s *Session) FinishJob(requestID string, err error) {
 	}
 	s.mu.Unlock()
 }
-func (s *Session) Start(requestID, kind, content string, delayMS int) error {
+func (s *Session) Start(requestID, kind, content string, delayMS int, clientCtx ...execution.ClientContext) error {
 	if kind != "echo" && kind != "model" {
 		return errors.New("unsupported execution kind")
 	}
@@ -217,6 +217,15 @@ func (s *Session) Start(requestID, kind, content string, delayMS int) error {
 		}
 		if err := json.Unmarshal(raw, &model); err != nil {
 			return errors.New("missing or invalid model state")
+		}
+		if len(clientCtx) > 0 {
+			var err error
+			model, err = model.WithClientContext(clientCtx[0])
+			if err != nil {
+				return err
+			}
+		} else if len(model.SelectedSkillIDs) > 0 {
+			return errors.New("skills unavailable: client context was not synchronized")
 		}
 		return model.ValidateModel()
 	}

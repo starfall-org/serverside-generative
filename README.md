@@ -1,6 +1,6 @@
 # serverside-generative
 
-A self-hosted, **memory-only session runtime** for Generative Android. Single-file Go CLI binary at deployment time; no Go toolchain, database, Firebase, broker, or permanent session storage is required.
+A self-hosted Go CLI session runtime for Generative Android. Execution jobs and API keys remain in RAM; the owner's shared instructions, Agent Skills and non-secret provider catalog are persisted in one private JSON configuration. No Go toolchain, database service, Firebase, or broker is needed at deployment.
 
 > **Current status: Go SDK-backed remote execution alpha.** The server can stream text from OpenAI Responses, OpenAI Chat Completions (including compatible endpoints), Google Gemini, and Anthropic Claude, and can explicitly list/call Streamable HTTP MCP tools. It does **not** yet support autonomous model tool loops, Android integration, multimodal requests, or NAT hole punching.
 
@@ -9,10 +9,12 @@ A self-hosted, **memory-only session runtime** for Generative Android. Single-fi
 - **Handshake / pairing** establishes a short-lived ticket and pins the server's TLS certificate.
 - **Data transport** is direct TLS 1.3 over TCP, with 4-byte big-endian length-prefixed JSON frames (max 4 MiB). The framing can later evolve to Protobuf without changing the handshake channels.
 - **Persistent reconnect identity** is a randomly generated 256-bit client secret; the server stores only its SHA-256 hash (0600). Android / testclient stores the secret locally (0600).
-- **Session runtime** keeps all chat state, API/MCP configuration, live events, and running jobs in RAM. No session, snapshot, event, credential, or output is written to disk by this application.
+- **One shared configuration for a personal server**: all paired devices see the same instructions, Agent Skills, base URLs and model catalogs. The server stores one private JSON file, not separate copies per client. Pairing itself is per device; shared configuration is per server.
+- **Optimistic configuration sync**: each connection confirms the current SHA-256 digest, fetches server changes, or updates the shared configuration with an expected revision. Concurrent/stale device writes are rejected rather than silently overwriting another device's edits.
+- **Ephemeral execution** keeps in-progress chat turns, pending events, API keys, MCP auth headers and running jobs in RAM. No session execution state, API credential, conversation transcript or model output is written to disk by this application.
 - **Reconnect** uses the saved client ID and secret to reauthenticate directly over TLS, without repeating SSH / HTTP / QR. Client sends `sync` and the last locally committed sequence; only missing events are returned.
 - **ACK** from Android is sent only **after** local persistence succeeds; ACK removes consumed event data from server RAM. Gaps are explicit errors, not silent data loss.
-- **Restart** loses all runtime sessions and pending results. The TLS identity and paired client credential hashes survive; Android must re-handoff context.
+- **Restart** preserves instructions, skills, provider URL/model catalogs, TLS identity, and pairing hashes. It loses running jobs and pending chat results. Android re-handoffs active sessions, but does not need to upload unchanged configuration again.
 
 ### Important network limitation
 
@@ -55,15 +57,16 @@ export GENERATIVE_HANDSHAKE_PASSWORD='replace-with-a-long-random-password'
 
 `--advertise` must name an address **reachable by the client**, not `0.0.0.0`. Never expose the plaintext HTTP handshake listener to the public Internet. Put it behind a properly authenticated HTTPS/WSS TLS-terminating reverse proxy, or use SSH/Human pairing instead. The TCP data channel uses pinned TLS 1.3.
 
-The server normally persists only these connection-related files under `~/.config/serverside-generative/`:
+The server stores these files under `~/.config/serverside-generative/` (private directory and file permissions):
 
 | File | Purpose |
 | --- | --- |
 | `identity.key`, `identity.crt` | Long-lived TLS identity (so reconnect does not require approving a new fingerprint) |
 | `clients.json` | Client IDs and **hashes** of client reconnect secrets |
 | `control.sock` | Unix socket (only while server is running) |
+| `shared-config.json` | One shared durable configuration for all paired clients: instructions, Agent Skills (SKILL.md text), provider IDs/base URLs/model catalog. Private file, mode 0600 |
 
-No provider credentials, chat contents, event logs, MCP configurations, or snapshots are stored. Operating-system swap, core dumps, and external provider logs must be controlled separately if strict non-persistence is required.
+**No API keys, authorization tokens, or MCP credential headers are persisted.** Provider metadata has a strict schema and rejects API key fields and base URLs containing query parameters. Chat execution state and event buffers remain in RAM. Clients must never include credentials in instruction/skill text or model names because these *are intentionally persisted*. OS swap, core dumps, and external provider logs should still be controlled to prevent sensitive RAM data from reaching disk.
 
 ## Handshake: three interchangeable methods
 
@@ -128,7 +131,7 @@ python3 testclient/client.py demo --state client-state.json \
   --session my-chat-1 --text 'Generated while the client was offline' --delay-ms 350
 ```
 
-This test transfers RAM-only context, starts the test `echo` job, **disconnects immediately**, lets it complete on the server, reconnects, replays events, then ACKs them and confirms that they are removed from RAM.
+This test transfers a RAM-only chat turn, starts the test `echo` job, **disconnects immediately**, lets it complete on the server, reconnects, replays events, then ACKs them and confirms that they are removed from RAM.
 
 The test client requires **Python 3.10+ standard library only**. To run the full end-to-end suite:
 
@@ -205,7 +208,47 @@ python3 testclient/client.py run --state client-state.json \
 
 The model SDK adapters currently support **text streaming only**; model tool calls and MCP execution are separate. An MCP tool is **never automatically executed by model output**. MCP Streamable HTTP is supported; local stdio processes and OAuth flows are not yet implemented. Both HTTP provider endpoints and MCP endpoints require HTTPS, except for literal loopback hosts in development.
 
-## Framed data protocol v1
+## Shared configuration sync for multiple personal devices
+
+This server is designed for **a single owner using several paired clients**. Every paired client can read and update the same durable instructions, skills and non-secret provider metadata. The server owns the shared configuration's monotonic revision; client devices may cache a local copy, but must never blindly replace a newer server revision with old local data.
+
+A compatible client exchanges `auth → paired(shared_revision,context_digest) → context_get | context_sync | context_update → session traffic`. The entire configuration travels over TLS with certificate pinning. On every reconnect, unchanged data costs only a digest confirmation.
+
+Example non-secret shared configuration:
+
+```json
+{
+  "instructions": "Answer concisely.",
+  "skills": [
+    {"id": "reviewer", "name": "Reviewer", "content": "# Reviewer\\nReview code carefully."}
+  ],
+  "providers": [
+    {"id": "main", "name": "OpenAI-compatible", "platform": "openai-chat",
+     "base_url": "https://api.example.com/v1", "models": ["model-a", "model-b"]}
+  ]
+}
+```
+
+**Reading**: after auth, send `context_get`; the server returns `context_state` with its current revision, digest and full shared configuration. Any paired client can fetch it.
+
+**Writing**: send `context_update` with the `revision` last read and the new full `context`. The server atomically persists it only if the expected revision is still current; otherwise it rejects the write as a conflict. A full replacement also supports deletions. Changes from one client become available to the others immediately.
+
+**Unchanged**: send `context_sync` with the current `revision` and `digest`. Server checks them and ACKs without transferring the content again.
+
+The Python test client offers an optional `--context-file` on initial pairing. If the server is empty, it can upload that file. If the server has changed and the local file has not, the test client fetches the newer copy. If *both* were edited, it reports a conflict instead of overwriting anything. Without a context file it fetches the shared data read-only.
+
+```bash
+python3 testclient/client.py pair \\
+  --method http --url http://127.0.0.1:7091 \\
+  --password 'your-long-password' --state client-state.json \\
+  --context-file client-context.json
+```
+
+For each active model request, Android may send only `{"provider":{"id":"main","model":"model-a","api_key":"..."}}`: platform and base URL are resolved from shared metadata. **API keys are not part of the persisted configuration**. Provider metadata rejects unknown fields and URL query parameters that could contain credentials; sensitive chat execution state and MCP authorization headers remain RAM-only.
+
+The on-wire protocol is **v4** and is incompatible with earlier alpha clients. Configuration is shared; in this alpha, live chat sessions and their pending events are still scoped to the paired client that created them.
+
+## Framed data protocol v4
 
 After TLS certificate fingerprint validation, send length-prefixed JSON:
 
@@ -213,13 +256,18 @@ After TLS certificate fingerprint validation, send length-prefixed JSON:
 {"type":"auth","ticket":"ONE_TIME_TICKET"}
 ```
 
-Server replies `{"type":"paired","client_id":"...","secret":"...","protocol":1}`. Persist the ID and secret on the Android client securely. Reconnect with `{"type":"auth","client_id":"...","secret":"..."}`; no new ticket is required.
+Server replies `{"type":"paired","client_id":"...","secret":"...","protocol":4,"shared_revision":1,"context_digest":"..."}`. Persist the ID and secret on the Android client securely. Reconnect with `{"type":"auth","client_id":"...","secret":"..."}`; no new ticket is required.
+
+Every connection must fetch, confirm or update the shared configuration before session traffic. Existing paired clients do not need another SSH/HTTP/QR handshake.
 
 Additional messages:
 
 | Client message | Server message | Purpose |
 | --- | --- | --- |
-| `handoff {session_id, revision, state}` | `handoff_ack` | Replace in-memory state with strictly increasing revision |
+| `context_get` | `context_state {revision, digest, context}` | Fetch the shared configuration for any paired client |
+| `context_sync {revision, digest}` | `context_ack {revision, digest, cached:true}` | Confirm unchanged shared config without sending contents |
+| `context_update {revision, context:{instructions, skills, providers}}` | `context_ack {revision, digest, cached:false}` | Atomic compare-and-swap update of global shared configuration; reject stale revisions |
+| `handoff {session_id, revision, state}` | `handoff_ack` | Replace in-memory execution state with strictly increasing revision |
 | `start {session_id, request_id, kind:"echo", content, delay_ms}` | `start_ack` | Test-only async echo job, idempotent by request ID |
 | `start {session_id, request_id, kind:"model"}` | `start_ack`, then `event` | Run provider SDK in background using RAM-only handoff state |
 | `mcp_list {session_id, request_id, mcp_server}` | `start_ack`, then `mcp_tools` event | List available MCP tools with official SDK |
@@ -236,7 +284,7 @@ Each payload is prefixed by a **4-byte unsigned big-endian byte length**. Creden
 
 - The API/MCP SDK adapters are functional, but only text-generation and explicit MCP calls are implemented; no automatic model tool-use loop, local MCP stdio command execution, or file/multimodal inputs yet.
 - TCP hole punching and address discovery remain separate work. Neither HTTP, SSH nor QR signaling alone removes the requirement for a reachable data endpoint.
-- No persistent event recovery after server restart. A client must resend the context from its own database.
+- No persistent event recovery after server restart. Android must resend active **chat execution state**; shared instructions, skills and provider catalogs survive. Cross-device chat-session replay is separate from shared configuration and is not yet implemented.
 - Current in-memory limits are 128 sessions, 2 MiB state per session and 2,048 retained events per session; overflow yields `sync_gap`.
 - A real Android client should persist reconnect secrets in Android Keystore-backed storage, and release Temporary Chats without handing them off.
 - Credential revocation should be enforced across already-active connections as this project evolves.

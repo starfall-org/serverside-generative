@@ -24,7 +24,7 @@ import (
 	"time"
 )
 
-const ProtocolVersion = 1
+const ProtocolVersion = 4
 const TicketLifetime = 2 * time.Minute
 
 type Config struct {
@@ -55,15 +55,18 @@ type pairEntry struct {
 	SecretHash string `json:"secret_hash"`
 }
 type Node struct {
-	Config      Config
-	Certificate tls.Certificate
-	Fingerprint string
-	mu          sync.Mutex
-	tickets     map[[32]byte]time.Time
-	pins        map[[32]byte]time.Time
-	pairs       map[string]pairEntry
-	attempts    map[string]*attempt
-	sessions    map[string]*Session
+	Config              Config
+	Certificate         tls.Certificate
+	Fingerprint         string
+	mu                  sync.Mutex
+	tickets             map[[32]byte]time.Time
+	pins                map[[32]byte]time.Time
+	pairs               map[string]pairEntry
+	attempts            map[string]*attempt
+	sessions            map[string]*Session
+	shared              syncedContext
+	activeConnection    map[string]uint64
+	nextConnectionEpoch uint64
 }
 type attempt struct {
 	Count int
@@ -170,7 +173,7 @@ func New(c Config) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	n := &Node{Config: c, Certificate: cert, Fingerprint: fp, tickets: make(map[[32]byte]time.Time), pins: make(map[[32]byte]time.Time), pairs: make(map[string]pairEntry), attempts: make(map[string]*attempt), sessions: make(map[string]*Session)}
+	n := &Node{Config: c, Certificate: cert, Fingerprint: fp, tickets: make(map[[32]byte]time.Time), pins: make(map[[32]byte]time.Time), pairs: make(map[string]pairEntry), attempts: make(map[string]*attempt), sessions: make(map[string]*Session), activeConnection: make(map[string]uint64)}
 	data, err := os.ReadFile(filepath.Join(c.IdentityDir, "clients.json"))
 	if err == nil {
 		var pairs []pairEntry
@@ -181,6 +184,9 @@ func New(c Config) (*Node, error) {
 			n.pairs[p.ID] = p
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if err := n.loadSharedConfig(); err != nil {
 		return nil, err
 	}
 	return n, nil
@@ -320,6 +326,23 @@ func (n *Node) revokePair(id string) error {
 	if _, ok := n.pairs[id]; !ok {
 		return errors.New("unknown client")
 	}
+	previous := n.pairs[id]
 	delete(n.pairs, id)
-	return n.persistPairsLocked()
+	if err := n.persistPairsLocked(); err != nil {
+		n.pairs[id] = previous
+		return err
+	}
+	delete(n.activeConnection, id)
+	for key, session := range n.sessions {
+		if session.Owner != id {
+			continue
+		}
+		delete(n.sessions, key)
+		session.mu.Lock()
+		for _, cancel := range session.Jobs {
+			cancel()
+		}
+		session.mu.Unlock()
+	}
+	return nil
 }

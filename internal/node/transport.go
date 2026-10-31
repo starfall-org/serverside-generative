@@ -26,6 +26,8 @@ type Message struct {
 	SessionID string          `json:"session_id,omitempty"`
 	Revision  uint64          `json:"revision,omitempty"`
 	State     json.RawMessage `json:"state,omitempty"`
+	Context   json.RawMessage `json:"context,omitempty"`
+	Digest    string          `json:"digest,omitempty"`
 	Since     uint64          `json:"since,omitempty"`
 	Seq       uint64          `json:"seq,omitempty"`
 	RequestID string          `json:"request_id,omitempty"`
@@ -125,13 +127,38 @@ func (n *Node) handleTCP(conn net.Conn) {
 	}
 	p.clientID = id
 	_ = conn.SetDeadline(time.Time{})
-	reply := map[string]any{"type": "paired", "client_id": id, "protocol": ProtocolVersion}
+	cachedRevision, cachedDigest, cachedSkills := n.contextSummary()
+	reply := map[string]any{"type": "paired", "client_id": id, "protocol": ProtocolVersion,
+		"shared_revision": cachedRevision, "context_digest": cachedDigest, "context_skills": cachedSkills}
 	if newPair {
 		reply["secret"] = secret
 	}
 	if err := p.send(reply); err != nil {
 		return
 	}
+	epoch := n.beginClientConnection(id)
+	// The client must first acknowledge the shared context or explicitly
+	// fetch/update it. No chat/session traffic can run before this point.
+	for {
+		var initial Message
+		if err := frameRead(conn, &initial); err != nil {
+			return
+		}
+		if !n.connectionCurrent(id, epoch) {
+			p.error(errors.New("connection superseded or revoked"))
+			return
+		}
+		if initial.Type != "context_sync" && initial.Type != "context_get" && initial.Type != "context_update" {
+			p.error(errors.New("context synchronization required before session traffic"))
+			return
+		}
+		if err := n.handleContextRequest(p, epoch, initial); err != nil {
+			p.error(err)
+			continue
+		}
+		break
+	}
+	_ = conn.SetDeadline(time.Time{})
 	defer func() {
 		for _, cancel := range p.subs {
 			cancel()
@@ -142,7 +169,16 @@ func (n *Node) handleTCP(conn net.Conn) {
 		if err := frameRead(conn, &msg); err != nil {
 			return
 		}
+		if !n.connectionCurrent(id, epoch) {
+			p.error(errors.New("connection superseded or pairing revoked"))
+			return
+		}
 		switch msg.Type {
+		case "context_sync", "context_get", "context_update":
+			if err := n.handleContextRequest(p, epoch, msg); err != nil {
+				p.error(err)
+				continue
+			}
 		case "handoff":
 			s, err := n.getSession(id, msg.SessionID, true)
 			if err == nil {
@@ -156,7 +192,7 @@ func (n *Node) handleTCP(conn net.Conn) {
 		case "start":
 			s, err := n.getSession(id, msg.SessionID, false)
 			if err == nil {
-				err = s.Start(msg.RequestID, msg.Kind, msg.Content, msg.DelayMS)
+				err = s.Start(msg.RequestID, msg.Kind, msg.Content, msg.DelayMS, n.clientContext(id))
 			}
 			if err != nil {
 				p.error(err)
@@ -254,6 +290,29 @@ func (n *Node) handleTCP(conn net.Conn) {
 		}
 	}
 }
+func (n *Node) handleContextRequest(p *peer, epoch uint64, msg Message) error {
+	switch msg.Type {
+	case "context_get":
+		state := n.contextSnapshot()
+		data, _ := json.Marshal(state.Context)
+		return p.send(map[string]any{"type": "context_state", "revision": state.Revision, "digest": digestContext(data), "context": state.Context})
+	case "context_sync":
+		count, err := n.confirmContext(p.clientID, epoch, msg.Revision, msg.Digest)
+		if err != nil {
+			return err
+		}
+		return p.send(map[string]any{"type": "context_ack", "revision": msg.Revision, "digest": msg.Digest, "skills": count, "cached": true})
+	case "context_update":
+		revision, digest, count, err := n.applyContext(p.clientID, epoch, msg.Revision, msg.Context)
+		if err != nil {
+			return err
+		}
+		return p.send(map[string]any{"type": "context_ack", "revision": revision, "digest": digest, "skills": count, "cached": false})
+	default:
+		return errors.New("unknown context action")
+	}
+}
+
 func (n *Node) authenticate(auth Message) (id, secret string, newPair bool) {
 	if auth.ClientID != "" && auth.Secret != "" {
 		if n.verifyPair(auth.ClientID, auth.Secret) {

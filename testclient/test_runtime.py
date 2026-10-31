@@ -170,6 +170,67 @@ class ProviderWireTests(unittest.TestCase):
         self.model_in_background("anthropic", "claude-test-model", max_tokens=32)
         self.assertTrue(any(path.endswith("/messages") for path, _, _ in FakeProvider.recorded))
 
+    def test_synced_instructions_and_selected_agent_skills_reach_model(self):
+        context_file = self.root / "exported-instructions-and-skills.json"
+        catalog = [{
+            "id": "mockprovider",
+            "name": "Mock OpenAI-compatible API",
+            "platform": "openai-chat",
+            "base_url": f"http://127.0.0.1:{self.mock.server_port}/v1",
+            "models": ["test-chat-model", "another-model"],
+        }]
+        context_file.write_text(json.dumps({
+            "instructions": "USER_INSTRUCTIONS_SYNC_A_621",
+            "skills": [
+                {"id": "summarize", "name": "Summarize", "content": "SKILL_SELECTED_729"},
+                {"id": "unused", "name": "Unused", "content": "SKILL_UNUSED_730"},
+            ],
+            "providers": catalog,
+        }))
+        credentials = {**self.state, "context_file": str(context_file)}
+        config = {
+            # Client sends no platform or base URL; both are cached on server.
+            "provider": {
+                "id": "mockprovider",
+                "model": "test-chat-model",
+                "api_key": "mock-key",
+            },
+            "conversation": [{"role": "user", "content": "Produce an answer."}],
+            "selected_skill_ids": ["summarize"],
+        }
+        result = client.run_remote(credentials, config, "instructions-v1", "model")
+        self.assertEqual(result["text"], "SDK working")
+        request = FakeProvider.recorded[-1][2]
+        all_messages = json.dumps(request.get("messages", []))
+        self.assertIn("USER_INSTRUCTIONS_SYNC_A_621", all_messages)
+        self.assertIn("SKILL_SELECTED_729", all_messages)
+        self.assertNotIn("SKILL_UNUSED_730", all_messages)
+
+        # Removing a skill from the next snapshot removes it from the server.
+        context_file.write_text(json.dumps({
+            "instructions": "USER_INSTRUCTIONS_SYNC_B_811",
+            "skills": [],
+            "providers": catalog,
+        }))
+        config["selected_skill_ids"] = []
+        self.assertEqual(client.run_remote(credentials, config, "instructions-v2", "model")["text"],
+                         "SDK working")
+        next_messages = json.dumps(FakeProvider.recorded[-1][2]["messages"])
+        self.assertIn("USER_INSTRUCTIONS_SYNC_B_811", next_messages)
+        self.assertNotIn("USER_INSTRUCTIONS_SYNC_A_621", next_messages)
+        self.assertNotIn("SKILL_SELECTED_729", next_messages)
+
+        config["selected_skill_ids"] = ["summarize"]
+        with self.assertRaises(RuntimeError):
+            client.run_remote(credentials, config, "instructions-skill-removed", "model")
+
+        # The server has not persisted the exported instructions/skills.
+        for file in ("identity.crt", "identity.key", "clients.json"):
+            raw = (self.runtime.root / file).read_bytes()
+            self.assertNotIn(b"USER_INSTRUCTIONS_SYNC_A_621", raw)
+            self.assertNotIn(b"SKILL_SELECTED_729", raw)
+            self.assertNotIn(b"USER_INSTRUCTIONS_SYNC_B_811", raw)
+
     def test_python_cli_run_real_model(self):
         config_path = self.root / "mock-runtime.json"
         config_path.write_text(json.dumps({
