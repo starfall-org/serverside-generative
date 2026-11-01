@@ -37,14 +37,30 @@ go build -trimpath -ldflags='-s -w' -o serverside ./cmd/serverside-generative
 
 ### Start the server
 
-For local experimentation:
+**SSH-only pairing needs no `GENERATIVE_HANDSHAKE_PASSWORD` and no HTTP/WS listener:**
+
+```bash
+./serverside serve --http-listen off \\
+  --tcp-listen 0.0.0.0:7090 \\
+  --advertise server.example.com:7090
+```
+
+Use your preconfigured OpenSSH public-key login and run `serverside handshake --stdio` on that server (see the SSH section below). The SSH command returns an ephemeral invitation; the Android/Python client subsequently connects to the **separate TLS/TCP data port**.
+
+For QR/PIN-only pairing, no application password is required either:
+
+```bash
+./serverside serve --http-listen off --human
+```
+
+For HTTP/WS pairing, configure a handshake password:
 
 ```bash
 export GENERATIVE_HANDSHAKE_PASSWORD='replace-with-a-long-random-password'
-./serverside serve --human
+./serverside serve
 ```
 
-For another device on a reachable network:
+For another device on a reachable network with HTTP/WS pairing:
 
 ```bash
 export GENERATIVE_HANDSHAKE_PASSWORD='replace-with-a-long-random-password'
@@ -89,7 +105,7 @@ python3 testclient/client.py pair --method ssh --ssh-target user@server --state 
 
 ### 2. HTTP / WebSocket (password required)
 
-Set `GENERATIVE_HANDSHAKE_PASSWORD` (at least 12 characters) or `--password` (environment variable is safer: command-line arguments may be visible in process listings). Client tries:
+Only the HTTP/WS pairing method requires `GENERATIVE_HANDSHAKE_PASSWORD` (at least 12 characters) or `--password` (environment variable is safer: command-line arguments may be visible in process listings). Without a password the HTTP/WS listener is automatically disabled, even if `--http-listen` has its default value. SSH and Human Relay continue to work normally. Client tries:
 
 1. `GET /v1/handshake/ws`: WebSocket upgrade + password in JSON message;
 2. if WS is unsupported: `POST /v1/handshake`: password in JSON body.

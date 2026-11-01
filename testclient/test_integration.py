@@ -63,8 +63,9 @@ class ServerRunner:
         if self.terminal_cwd:
             args.extend(["--terminal-cwd", self.terminal_cwd])
         self.log_file = open(self.root / "daemon-test-log.txt", "a")
+        env = {**os.environ, "GENERATIVE_HANDSHAKE_PASSWORD": self.password}
         self.process = subprocess.Popen(
-            args, env={**os.environ, "GENERATIVE_HANDSHAKE_PASSWORD": self.password},
+            args, env=env,
             stdout=self.log_file, stderr=self.log_file,
         )
         deadline = time.monotonic() + 8
@@ -75,6 +76,8 @@ class ServerRunner:
                 sock = socket.create_connection(("127.0.0.1", self.tcp_port), timeout=.15)
                 sock.close()
                 if self.ipc.exists():
+                    if not self.password:
+                        return
                     # TCP can be ready before the HTTP/WS handshake listener.
                     try:
                         check = socket.create_connection(("127.0.0.1", self.http_port), timeout=.15)
@@ -235,6 +238,31 @@ class Integration(unittest.TestCase):
         disk = (self.runner.root / "clients.json").read_text()
         self.assertNotIn("RAM_ONLY_SECRET_989393", disk)
         self.assertNotIn(state["secret"], disk)
+
+
+class PasswordlessSSH(unittest.TestCase):
+    def test_ssh_handshake_without_http_or_password(self):
+        with tempfile.TemporaryDirectory(prefix="ssg-ssh-only-") as directory:
+            runner = ServerRunner(Path(directory) / "identity", password="")
+            runner.start()
+            try:
+                self.assertIsNone(runner.process.poll())
+                # The HTTP handshake is disabled, not secretly exposed without auth.
+                with self.assertRaises(OSError):
+                    socket.create_connection(("127.0.0.1", runner.http_port), timeout=.2)
+                command = f"{BINARY} handshake --stdio --ipc {runner.ipc}"
+                invite = client.handshake_ssh(command)
+                self.assertTrue(invite["ticket"])
+                state = client.pair(invite, Path(directory) / "ssh-client.json")
+                self.assertEqual(
+                    client.demo(state, "ssh-only", "SSH-only pairing without application password", 100)["content"],
+                    "SSH-only pairing without application password"
+                )
+                output = (runner.root / "daemon-test-log.txt").read_text()
+                self.assertIn("no password; SSH/Human Relay available", output)
+                self.assertNotIn("HTTP/WS handshake: 127.0.0.1", output)
+            finally:
+                runner.stop()
 
 
 class HTTPFallback(unittest.TestCase):

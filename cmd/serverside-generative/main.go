@@ -85,8 +85,8 @@ func run(args []string) error {
 		fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 		tcpAddr := fs.String("tcp-listen", "127.0.0.1:7090", "TLS/TCP data listener")
 		advertise := fs.String("advertise", "", "TCP endpoint advertised to clients (host:port)")
-		httpAddr := fs.String("http-listen", "127.0.0.1:7091", "HTTP/WS handshake listener; 'off' disables")
-		password := fs.String("password", os.Getenv("GENERATIVE_HANDSHAKE_PASSWORD"), "handshake password (prefer environment variable)")
+		httpAddr := fs.String("http-listen", "127.0.0.1:7091", "HTTP/WS handshake listener; requires a password and 'off' disables")
+		password := fs.String("password", os.Getenv("GENERATIVE_HANDSHAKE_PASSWORD"), "optional HTTP/WS handshake password (not needed for SSH or Human Relay)")
 		identityDir := fs.String("identity-dir", "", "connection identity and paired client credential hashes only")
 		ipc := fs.String("ipc", "", "control socket for SSH handshake and human pairing")
 		human := fs.Bool("human", false, "display Human Relay QR and PIN on startup")
@@ -100,7 +100,7 @@ func run(args []string) error {
 		if err := node.SafeHTTPBind(*httpAddr, *allowPublic); err != nil {
 			return err
 		}
-		if *password != "" && len(*password) < 12 {
+		if *password != "" && len(*password) < 12 && !strings.EqualFold(*httpAddr, "off") {
 			return fmt.Errorf("HTTP/WS password must be at least 12 characters")
 		}
 		listener, err := net.Listen("tcp", *tcpAddr)
@@ -148,8 +148,10 @@ func run(args []string) error {
 				}
 			}()
 			fmt.Println("HTTP/WS handshake:", httpListener.Addr().String())
+		} else if strings.EqualFold(*httpAddr, "off") {
+			fmt.Println("HTTP/WS handshake: disabled (--http-listen off)")
 		} else {
-			fmt.Println("HTTP/WS handshake: disabled (set GENERATIVE_HANDSHAKE_PASSWORD)")
+			fmt.Println("HTTP/WS handshake: disabled (no password; SSH/Human Relay available)")
 		}
 		fmt.Println("Data transport (TLS 1.3):", listener.Addr().String())
 		fmt.Println("Advertised endpoint:     ", ep)
