@@ -30,12 +30,15 @@ def open_port() -> int:
 
 
 class ServerRunner:
-    def __init__(self, root: Path, *, http_only: bool = False, password: str = PASSWORD):
+    def __init__(self, root: Path, *, http_only: bool = False, password: str = PASSWORD,
+                 enable_terminal: bool = False, terminal_cwd: str | None = None):
         self.root = root
         self.tcp_port, self.http_port = open_port(), open_port()
         self.ipc = root / "control.sock"
         self.password = password
         self.http_only = http_only
+        self.enable_terminal = enable_terminal
+        self.terminal_cwd = terminal_cwd
         self.process: subprocess.Popen | None = None
         self.log_file = None
 
@@ -55,6 +58,10 @@ class ServerRunner:
         ]
         if self.http_only:
             args.append("--http-only")
+        if self.enable_terminal:
+            args.append("--enable-terminal")
+        if self.terminal_cwd:
+            args.extend(["--terminal-cwd", self.terminal_cwd])
         self.log_file = open(self.root / "daemon-test-log.txt", "a")
         self.process = subprocess.Popen(
             args, env={**os.environ, "GENERATIVE_HANDSHAKE_PASSWORD": self.password},

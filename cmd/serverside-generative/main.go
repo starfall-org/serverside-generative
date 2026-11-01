@@ -92,6 +92,8 @@ func run(args []string) error {
 		human := fs.Bool("human", false, "display Human Relay QR and PIN on startup")
 		onlyHTTP := fs.Bool("http-only", false, "disable WS to test HTTP fallback")
 		allowPublic := fs.Bool("allow-public-http", false, "dangerous: allow plain HTTP binding beyond loopback")
+		enableTerminal := fs.Bool("enable-terminal", false, "enable remote terminal creation and shell execution for authenticated clients")
+		terminalCWD := fs.String("terminal-cwd", "", "working directory for remote terminal shells; defaults to current directory")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -117,11 +119,12 @@ func run(args []string) error {
 		if host == "" || host == "0.0.0.0" || host == "::" {
 			return fmt.Errorf("set --advertise to a reachable address instead of %q", ep)
 		}
-		c := node.Config{TCPListen: listener.Addr().String(), Advertise: ep, HTTPListen: *httpAddr, IPCSocket: *ipc, IdentityDir: *identityDir, Password: *password, Human: *human, HTTPOnly: *onlyHTTP, AllowPublicHTTP: *allowPublic}
+		c := node.Config{TCPListen: listener.Addr().String(), Advertise: ep, HTTPListen: *httpAddr, IPCSocket: *ipc, IdentityDir: *identityDir, Password: *password, Human: *human, HTTPOnly: *onlyHTTP, AllowPublicHTTP: *allowPublic, EnableTerminal: *enableTerminal, TerminalCWD: *terminalCWD}
 		n, err := node.New(c)
 		if err != nil {
 			return err
 		}
+		defer n.Close()
 		sock := n.Config.IPCSocket
 		control, err := node.StartIPCSocket(sock)
 		if err != nil {
@@ -153,7 +156,12 @@ func run(args []string) error {
 		fmt.Println("Server TLS fingerprint:  ", n.Fingerprint)
 		fmt.Println("SSH handshake command:    ssh -T USER@HOST serverside handshake --stdio")
 		fmt.Println("Pairing control socket:  ", sock)
-		fmt.Println("All chat/session/API/MCP contents remain in RAM.")
+		fmt.Println("Execution/chat/API credentials and terminal buffers remain in RAM.")
+		if n.Terminals != nil {
+			fmt.Println("Remote terminal: enabled (up to 8 concurrent interactive sessions)")
+		} else {
+			fmt.Println("Remote terminal: disabled (--enable-terminal to opt in)")
+		}
 		if *human {
 			invite, err := n.IssueHuman()
 			if err != nil {

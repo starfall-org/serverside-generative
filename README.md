@@ -208,6 +208,47 @@ python3 testclient/client.py run --state client-state.json \
 
 The model SDK adapters currently support **text streaming only**; model tool calls and MCP execution are separate. An MCP tool is **never automatically executed by model output**. MCP Streamable HTTP is supported; local stdio processes and OAuth flows are not yet implemented. Both HTTP provider endpoints and MCP endpoints require HTTPS, except for literal loopback hosts in development.
 
+## Built-in server terminal tools (opt-in)
+
+`serverside` includes these native tools for authenticated, paired clients:
+
+| Tool | What it does |
+| --- | --- |
+| `terminal_create` | Start a new interactive terminal process; returns an unguessable `terminal_id` |
+| `terminal_execute` | Write a shell command to the terminal's stdin; returns the first bounded output chunk |
+| `terminal_read` | Read captured PTY output by byte offset, with optional long polling |
+| `terminal_close` | Kill the shell/process group and free the in-memory buffers |
+| `terminal_list` | List terminals currently running on this personal server |
+| `tools_list` | Discover built-in tool schemas and whether terminal execution is enabled |
+
+**Terminal execution is disabled by default** because it grants arbitrary OS command execution with the permissions of the `serverside` process. On a machine you control, use a dedicated **unprivileged OS account** and working directory:
+
+```bash
+./serverside serve --enable-terminal --terminal-cwd /srv/generative-work
+```
+
+Then, using a paired Python test client:
+
+```bash
+python3 testclient/client.py terminal tools --state client-state.json
+python3 testclient/client.py terminal create --state client-state.json
+# Copy the terminal_id from the JSON response:
+python3 testclient/client.py terminal execute --state client-state.json \\
+  --terminal-id YOUR_TERMINAL_ID --command "pwd; ls -la"
+python3 testclient/client.py terminal read --state client-state.json \\
+  --terminal-id YOUR_TERMINAL_ID --offset 0 --wait-ms 300
+python3 testclient/client.py terminal close --state client-state.json \\
+  --terminal-id YOUR_TERMINAL_ID
+```
+
+The read/execute responses provide `text` plus `data_base64` (the original bytes), `offset`, `next_offset`, `truncated`, `running` and, after process exit, `exit_code`. Use the returned `next_offset` on the next read; no need to resend previous bytes. A `truncated:true` response means earlier output exceeded the bounded buffer.
+
+Terminals stay alive **after the client disconnects**, may be accessed by any paired device in this single-owner deployment, and survive multiple concurrent chat requests. They are **not written to the database** and disappear on server restart. At most **8** terminals run at once, each retaining up to **256 KiB** of output, with at most **64 KiB** per read. The 30-minute idle cleanup applies only to terminal processes that already exited.
+
+On Linux/macOS, terminals use a real PTY and closing terminates their process group. Windows builds provide a shell/pipe fallback, not a ConPTY TTY. Terminal commands can themselves create/modify files; the server does not sandbox arbitrary OS commands. Do not give access to a paired device you do not trust.
+
+**Current limitation:** these tools can be called through the authenticated client protocol and discovered through `tools_list`. The model SDK text-streaming loop does not yet automatically expose/execute them as AI-requested function calls; agent tool dispatch needs a separate implementation and appropriate execution controls.
+
 ## Shared configuration sync for multiple personal devices
 
 This server is designed for **a single owner using several paired clients**. Every paired client can read and update the same durable instructions, skills and non-secret provider metadata. The server owns the shared configuration's monotonic revision; client devices may cache a local copy, but must never blindly replace a newer server revision with old local data.
@@ -272,6 +313,12 @@ Additional messages:
 | `start {session_id, request_id, kind:"model"}` | `start_ack`, then `event` | Run provider SDK in background using RAM-only handoff state |
 | `mcp_list {session_id, request_id, mcp_server}` | `start_ack`, then `mcp_tools` event | List available MCP tools with official SDK |
 | `mcp_call {session_id, request_id, mcp_server, mcp_tool, arguments}` | `start_ack`, then `mcp_result` event | Explicitly call authorized MCP tool |
+| `tools_list` | `tools_list {tools}` | Get built-in tool names, JSON schemas and enablement |
+| `terminal_create {rows, cols}` | `terminal_created {terminal_id}` | Create PTY, only if the server enables terminal execution |
+| `terminal_execute {terminal_id, command, wait_ms}` | `terminal_executed` | Execute a command; return bounded PTY output |
+| `terminal_read {terminal_id, offset, max_bytes, wait_ms}` | `terminal_output` | Read terminal buffer incrementally |
+| `terminal_list` | `terminal_list {terminals}` | Discover all active terminals on the personal server |
+| `terminal_close {terminal_id}` | `terminal_closed` | Terminate terminal and free resources |
 | `sync {session_id, since}` | `sync_begin`, `event*`, `sync_end` | Replay events then continuously subscribe |
 | `ack {session_id, seq}` | `ack_ok` | Release events **after** local durable write |
 | `status {session_id}` | `status` | Inspect active in-RAM job/event counts |
@@ -282,7 +329,7 @@ Each payload is prefixed by a **4-byte unsigned big-endian byte length**. Creden
 
 ## Limitations / next steps
 
-- The API/MCP SDK adapters are functional, but only text-generation and explicit MCP calls are implemented; no automatic model tool-use loop, local MCP stdio command execution, or file/multimodal inputs yet.
+- The API/MCP SDK adapters support text generation and explicit MCP calls. Built-in terminal tools are directly callable by an authenticated client, but **automatic model tool-use loops** are not yet wired into the SDKs.
 - TCP hole punching and address discovery remain separate work. Neither HTTP, SSH nor QR signaling alone removes the requirement for a reachable data endpoint.
 - No persistent event recovery after server restart. Android must resend active **chat execution state**; shared instructions, skills and provider catalogs survive. Cross-device chat-session replay is separate from shared configuration and is not yet implemented.
 - Current in-memory limits are 128 sessions, 2 MiB state per session and 2,048 retained events per session; overflow yields `sync_gap`.

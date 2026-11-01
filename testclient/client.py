@@ -512,6 +512,27 @@ def run_remote(
         sock.close()
 
 
+def terminal_request(auth: dict[str, Any], action: str, **values: Any) -> dict[str, Any]:
+    """Call a built-in terminal tool; each request can use a new authenticated connection."""
+    mapping = {
+        "create": "terminal_create",
+        "execute": "terminal_execute",
+        "read": "terminal_read",
+        "close": "terminal_close",
+        "list": "terminal_list",
+        "tools": "tools_list",
+    }
+    if action not in mapping:
+        raise ValueError("unsupported terminal action")
+    with reconnect(auth) as sock:
+        message = {"type": mapping[action], **values}
+        write_frame(sock, message)
+        answer = read_frame(sock)
+        if answer.get("type") == "error":
+            raise RuntimeError(answer.get("message") or "server rejected terminal request")
+        return answer
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest="command", required=True)
@@ -542,6 +563,16 @@ def main() -> None:
     work.add_argument("--mcp-tool", default="")
     work.add_argument("--arguments-file", type=Path)
     work.add_argument("--timeout", type=int, default=120)
+    term = subs.add_parser("terminal", help="Create/execute/read/close an authenticated remote terminal")
+    term.add_argument("action", choices=("create", "execute", "read", "close", "list", "tools"))
+    term.add_argument("--state", type=Path, default=Path("testclient-state.json"))
+    term.add_argument("--terminal-id")
+    term.add_argument("--command", dest="shell_command")
+    term.add_argument("--offset", type=int, default=0)
+    term.add_argument("--max-bytes", type=int, default=65536)
+    term.add_argument("--wait-ms", type=int, default=200)
+    term.add_argument("--rows", type=int, default=24)
+    term.add_argument("--cols", type=int, default=80)
     args = parser.parse_args()
     if args.command == "pair":
         if args.method == "http":
@@ -550,7 +581,7 @@ def main() -> None:
             invite, channel = handshake_http(args.url, args.password, allow_insecure=args.insecure_http)
         elif args.method == "ssh":
             if args.ssh_target:
-                cmd = f"ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes {shlex.quote(args.ssh_target)} serverside-generative handshake --stdio"
+                cmd = f"ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes {shlex.quote(args.ssh_target)} serverside handshake --stdio"
             else:
                 cmd = args.ssh_command or ""
             invite = handshake_ssh(cmd)
@@ -565,6 +596,24 @@ def main() -> None:
         state = json.loads(args.state.read_text())
         state["_state_path"] = str(args.state)
         print(json.dumps(demo(state, args.session, args.text, args.delay_ms), ensure_ascii=False))
+    elif args.command == "terminal":
+        auth = json.loads(args.state.read_text())
+        auth["_state_path"] = str(args.state)
+        values = {}
+        if args.action == "create":
+            values = {"rows": args.rows, "cols": args.cols}
+        if args.action in ("execute", "read", "close"):
+            if not args.terminal_id:
+                parser.error("terminal ID is required for execute/read/close")
+            values["terminal_id"] = args.terminal_id
+        if args.action == "execute":
+            if not args.shell_command:
+                parser.error("--command is required for terminal execute")
+            values.update({"command": args.shell_command, "wait_ms": args.wait_ms})
+        if args.action == "read":
+            values.update({"offset": args.offset, "max_bytes": args.max_bytes,
+                           "wait_ms": args.wait_ms})
+        print(json.dumps(terminal_request(auth, args.action, **values), ensure_ascii=False))
     else:
         auth = json.loads(args.state.read_text())
         auth["_state_path"] = str(args.state)

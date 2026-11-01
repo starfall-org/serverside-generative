@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/starfall-org/serverside-generative/internal/terminal"
 )
 
 const ProtocolVersion = 4
@@ -37,6 +39,8 @@ type Config struct {
 	Human           bool
 	HTTPOnly        bool
 	AllowPublicHTTP bool
+	EnableTerminal  bool
+	TerminalCWD     string
 }
 type Invitation struct {
 	Protocol    int    `json:"protocol"`
@@ -67,6 +71,7 @@ type Node struct {
 	shared              syncedContext
 	activeConnection    map[string]uint64
 	nextConnectionEpoch uint64
+	Terminals           *terminal.Manager
 }
 type attempt struct {
 	Count int
@@ -188,6 +193,13 @@ func New(c Config) (*Node, error) {
 	}
 	if err := n.loadSharedConfig(); err != nil {
 		return nil, err
+	}
+	if c.EnableTerminal {
+		mgr, err := terminal.NewManager(c.TerminalCWD)
+		if err != nil {
+			return nil, err
+		}
+		n.Terminals = mgr
 	}
 	return n, nil
 }
@@ -345,4 +357,9 @@ func (n *Node) revokePair(id string) error {
 		session.mu.Unlock()
 	}
 	return nil
+}
+func (n *Node) Close() {
+	if n.Terminals != nil {
+		n.Terminals.CloseAll()
+	}
 }

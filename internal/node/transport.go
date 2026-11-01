@@ -18,25 +18,32 @@ import (
 const maxFrame = 4 << 20
 
 type Message struct {
-	Type      string          `json:"type"`
-	Ticket    string          `json:"ticket,omitempty"`
-	PIN       string          `json:"pin,omitempty"`
-	ClientID  string          `json:"client_id,omitempty"`
-	Secret    string          `json:"secret,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
-	Revision  uint64          `json:"revision,omitempty"`
-	State     json.RawMessage `json:"state,omitempty"`
-	Context   json.RawMessage `json:"context,omitempty"`
-	Digest    string          `json:"digest,omitempty"`
-	Since     uint64          `json:"since,omitempty"`
-	Seq       uint64          `json:"seq,omitempty"`
-	RequestID string          `json:"request_id,omitempty"`
-	Kind      string          `json:"kind,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	DelayMS   int             `json:"delay_ms,omitempty"`
-	MCPServer string          `json:"mcp_server,omitempty"`
-	MCPTool   string          `json:"mcp_tool,omitempty"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Type       string          `json:"type"`
+	Ticket     string          `json:"ticket,omitempty"`
+	PIN        string          `json:"pin,omitempty"`
+	ClientID   string          `json:"client_id,omitempty"`
+	Secret     string          `json:"secret,omitempty"`
+	SessionID  string          `json:"session_id,omitempty"`
+	Revision   uint64          `json:"revision,omitempty"`
+	State      json.RawMessage `json:"state,omitempty"`
+	Context    json.RawMessage `json:"context,omitempty"`
+	Digest     string          `json:"digest,omitempty"`
+	Since      uint64          `json:"since,omitempty"`
+	Seq        uint64          `json:"seq,omitempty"`
+	RequestID  string          `json:"request_id,omitempty"`
+	Kind       string          `json:"kind,omitempty"`
+	Content    string          `json:"content,omitempty"`
+	DelayMS    int             `json:"delay_ms,omitempty"`
+	MCPServer  string          `json:"mcp_server,omitempty"`
+	MCPTool    string          `json:"mcp_tool,omitempty"`
+	Arguments  json.RawMessage `json:"arguments,omitempty"`
+	TerminalID string          `json:"terminal_id,omitempty"`
+	Command    string          `json:"command,omitempty"`
+	Offset     uint64          `json:"offset,omitempty"`
+	MaxBytes   int             `json:"max_bytes,omitempty"`
+	WaitMS     int             `json:"wait_ms,omitempty"`
+	Rows       int             `json:"rows,omitempty"`
+	Cols       int             `json:"cols,omitempty"`
 }
 type peer struct {
 	conn     net.Conn
@@ -283,6 +290,10 @@ func (n *Node) handleTCP(conn net.Conn) {
 			}
 			_ = p.send(map[string]any{"type": "revoked"})
 			return
+		case "tools_list":
+			_ = p.send(map[string]any{"type": "tools_list", "tools": n.builtinTools()})
+		case "terminal_create", "terminal_execute", "terminal_read", "terminal_close", "terminal_list":
+			n.handleTerminal(p, msg)
 		case "ping":
 			_ = p.send(map[string]any{"type": "pong"})
 		default:
