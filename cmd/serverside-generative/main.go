@@ -94,6 +94,8 @@ func run(args []string) error {
 		allowPublic := fs.Bool("allow-public-http", false, "dangerous: allow plain HTTP binding beyond loopback")
 		enableTerminal := fs.Bool("enable-terminal", false, "enable remote terminal creation and shell execution for authenticated clients")
 		terminalCWD := fs.String("terminal-cwd", "", "working directory for remote terminal shells; defaults to current directory")
+		enableAgent := fs.Bool("enable-agent", false, "allow paired clients to control structured Claude Code, Codex and OpenCode sessions")
+		agentRoot := fs.String("agent-root", "", "working directory root for new agent processes; defaults to current directory")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -119,7 +121,7 @@ func run(args []string) error {
 		if host == "" || host == "0.0.0.0" || host == "::" {
 			return fmt.Errorf("set --advertise to a reachable address instead of %q", ep)
 		}
-		c := node.Config{TCPListen: listener.Addr().String(), Advertise: ep, HTTPListen: *httpAddr, IPCSocket: *ipc, IdentityDir: *identityDir, Password: *password, Human: *human, HTTPOnly: *onlyHTTP, AllowPublicHTTP: *allowPublic, EnableTerminal: *enableTerminal, TerminalCWD: *terminalCWD}
+		c := node.Config{TCPListen: listener.Addr().String(), Advertise: ep, HTTPListen: *httpAddr, IPCSocket: *ipc, IdentityDir: *identityDir, Password: *password, Human: *human, HTTPOnly: *onlyHTTP, AllowPublicHTTP: *allowPublic, EnableTerminal: *enableTerminal, TerminalCWD: *terminalCWD, EnableAgent: *enableAgent, AgentRoot: *agentRoot}
 		n, err := node.New(c)
 		if err != nil {
 			return err
@@ -163,6 +165,11 @@ func run(args []string) error {
 			fmt.Println("Remote terminal: enabled (up to 8 concurrent interactive sessions)")
 		} else {
 			fmt.Println("Remote terminal: disabled (--enable-terminal to opt in)")
+		}
+		if n.Agents != nil {
+			fmt.Println("Structured coding agents: enabled (Claude Code, Codex, OpenCode)")
+		} else {
+			fmt.Println("Structured coding agents: disabled (--enable-agent to opt in)")
 		}
 		if *human {
 			invite, err := n.IssueHuman()

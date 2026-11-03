@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/starfall-org/serverside-generative/internal/agent"
 	"github.com/starfall-org/serverside-generative/internal/terminal"
 )
 
@@ -41,6 +42,8 @@ type Config struct {
 	AllowPublicHTTP bool
 	EnableTerminal  bool
 	TerminalCWD     string
+	EnableAgent     bool
+	AgentRoot       string
 }
 type Invitation struct {
 	Protocol    int    `json:"protocol"`
@@ -72,6 +75,7 @@ type Node struct {
 	activeConnection    map[string]uint64
 	nextConnectionEpoch uint64
 	Terminals           *terminal.Manager
+	Agents              *agent.Manager
 }
 type attempt struct {
 	Count int
@@ -200,6 +204,14 @@ func New(c Config) (*Node, error) {
 			return nil, err
 		}
 		n.Terminals = mgr
+	}
+	if c.EnableAgent {
+		mgr, err := agent.New(c.AgentRoot)
+		if err != nil {
+			n.Close()
+			return nil, err
+		}
+		n.Agents = mgr
 	}
 	return n, nil
 }
@@ -359,6 +371,9 @@ func (n *Node) revokePair(id string) error {
 	return nil
 }
 func (n *Node) Close() {
+	if n.Agents != nil {
+		n.Agents.CloseAll()
+	}
 	if n.Terminals != nil {
 		n.Terminals.CloseAll()
 	}
