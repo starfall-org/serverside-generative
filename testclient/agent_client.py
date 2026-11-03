@@ -4,15 +4,57 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
+import stat
 import sys
+import tempfile
 
 import client
 
 
+def load_trusted_state(state: Path) -> tuple[Path, dict]:
+    """Read only a private, owned state file within a trusted local directory.
+
+    Agent CLI arguments may be supplied by an automated caller. Never let a
+    relative traversal, symlink or shared file become reconnect credentials.
+    """
+    requested = state.expanduser()
+    if ".." in requested.parts:
+        raise ValueError("parent directory traversal is forbidden in --state")
+    roots = (Path.cwd().resolve(), Path.home().resolve(), Path(tempfile.gettempdir()).resolve())
+    candidate = requested if requested.is_absolute() else roots[0] / requested
+    if candidate.is_symlink():
+        raise ValueError("--state must not be a symlink")
+    path = candidate.resolve(strict=True)
+    if not any(path.is_relative_to(root) for root in roots):
+        raise ValueError("--state must be inside the working directory, home or temp directory")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        details = os.fstat(fd)
+        if not stat.S_ISREG(details.st_mode):
+            raise ValueError("--state must refer to a regular file")
+        if hasattr(os, "getuid") and details.st_uid != os.getuid():
+            raise PermissionError("--state must be owned by the current user")
+        if details.st_mode & 0o077:
+            raise PermissionError("--state contains credentials and must be private (chmod 600)")
+        if details.st_size > 65536:
+            raise ValueError("--state is too large")
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            data = json.load(handle)
+    finally:
+        if fd != -1:
+            os.close(fd)
+    if not isinstance(data, dict):
+        raise ValueError("--state must contain a JSON object")
+    return path, data
+
+
 def call(state: Path, payload: dict) -> dict:
-    auth = json.loads(state.read_text(encoding="utf-8"))
-    auth["_state_path"] = str(state)
+    path, auth = load_trusted_state(state)
+    auth["_state_path"] = str(path)
     with client.reconnect(auth) as sock:
         client.write_frame(sock, payload)
         reply = client.read_frame(sock)

@@ -127,7 +127,9 @@ func (b *openCodeBackend) start(ctx context.Context) error {
 	b.mu.Lock()
 	b.sessionID = id
 	b.mu.Unlock()
-	eventCtx, cancel := context.WithCancel(context.Background())
+	// Startup uses a short-lived timeout; the SSE loop must outlive that
+	// timeout while retaining context values and its own close cancellation.
+	eventCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	b.eventsStop = cancel
 	go b.stream(eventCtx)
 	return nil
