@@ -4,6 +4,8 @@ A self-hosted Go CLI session runtime for Generative Android. Execution jobs and 
 
 > **Current status: Go SDK-backed remote execution alpha.** The server can stream text from OpenAI Responses, OpenAI Chat Completions (including compatible endpoints), Google Gemini, and Anthropic Claude, and can explicitly list/call Streamable HTTP MCP tools. It does **not** yet support autonomous model tool loops, Android integration, multimodal requests, or NAT hole punching.
 
+**Independent structured coding-agent support:** Enable `--enable-agent` to let paired clients directly control Claude Code, Codex and OpenCode over their native bidirectional/JSON-RPC/HTTP+SSE protocols, with separate session state and structured content/reasoning/tool/approval events. `agent.type` is required; `agent.binary` is optional for forks. This is not a model tool or a terminal-scraping feature. See [Structured coding-agent sessions](docs/structured-agents.md).
+
 ## Architecture
 
 - **Handshake / pairing** establishes a short-lived ticket and pins the server's TLS certificate.
