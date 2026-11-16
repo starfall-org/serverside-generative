@@ -20,6 +20,7 @@ import (
 const maxFrame = 4 << 20
 
 type Message struct {
+	Protocol       int             `json:"protocol,omitempty"`
 	Type           string          `json:"type"`
 	Ticket         string          `json:"ticket,omitempty"`
 	PIN            string          `json:"pin,omitempty"`
@@ -53,10 +54,11 @@ type Message struct {
 	Decision       string          `json:"decision,omitempty"`
 }
 type peer struct {
-	conn     net.Conn
-	writes   sync.Mutex
-	clientID string
-	subs     []func()
+	conn         net.Conn
+	writes       sync.Mutex
+	writeTimeout time.Duration
+	clientID     string
+	subs         []func()
 }
 
 func frameRead(r io.Reader, v any) error {
@@ -84,6 +86,12 @@ func (p *peer) send(v any) error {
 	}
 	p.writes.Lock()
 	defer p.writes.Unlock()
+	if p.writeTimeout > 0 {
+		if err = p.conn.SetWriteDeadline(time.Now().Add(p.writeTimeout)); err != nil {
+			return err
+		}
+		defer p.conn.SetWriteDeadline(time.Time{})
+	}
 	var head [4]byte
 	binary.BigEndian.PutUint32(head[:], uint32(len(data)))
 	if _, err = p.conn.Write(head[:]); err != nil {
@@ -131,9 +139,22 @@ func (n *Node) handleTCP(conn net.Conn) {
 		p.error(errors.New("auth required"))
 		return
 	}
-	id, secret, newPair := n.authenticate(auth)
+	var id, secret string
+	var newPair bool
+	if auth.Protocol == 5 {
+		if auth.ClientID != "" && auth.Secret != "" && auth.Ticket == "" && auth.PIN == "" && n.verifyPairFor(auth.ClientID, auth.Secret, "tcp") {
+			id = auth.ClientID
+		}
+	} else {
+		if auth.Ticket != "" || auth.PIN != "" {
+			if !n.Config.LegacyPairing {
+				p.error(errors.New("legacy TCP pairing disabled; use SSH pairing"))
+				return
+			}
+		}
+		id, secret, newPair = n.authenticate(auth)
+	}
 	if id == "" {
-		host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 		if n.limit("tcp:" + host) {
 			p.error(errors.New("authentication failed"))
 		}
@@ -141,6 +162,14 @@ func (n *Node) handleTCP(conn net.Conn) {
 	}
 	p.clientID = id
 	_ = conn.SetDeadline(time.Time{})
+	if auth.Protocol == 5 {
+		p.writeTimeout = 10 * time.Second
+		reply := map[string]any{"type": "paired", "client_id": id, "protocol": 5}
+		if p.send(reply) == nil {
+			n.serveRPCPeer(p)
+		}
+		return
+	}
 	cachedRevision, cachedDigest, cachedSkills := n.contextSummary()
 	reply := map[string]any{"type": "paired", "client_id": id, "protocol": ProtocolVersion,
 		"shared_revision": cachedRevision, "context_digest": cachedDigest, "context_skills": cachedSkills}
@@ -335,7 +364,7 @@ func (n *Node) handleContextRequest(p *peer, epoch uint64, msg Message) error {
 
 func (n *Node) authenticate(auth Message) (id, secret string, newPair bool) {
 	if auth.ClientID != "" && auth.Secret != "" {
-		if n.verifyPair(auth.ClientID, auth.Secret) {
+		if n.verifyPairFor(auth.ClientID, auth.Secret, "tcp") {
 			return auth.ClientID, "", false
 		}
 		return "", "", false

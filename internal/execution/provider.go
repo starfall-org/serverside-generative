@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -19,27 +20,35 @@ import (
 // Configuration is supplied by the paired Android client during handoff.
 // Never write this structure to a file, environment variable, or log.
 type State struct {
-	Provider         Provider    `json:"provider"`
-	Conversation     []Message   `json:"conversation"`
-	MCP              []MCPServer `json:"mcp,omitempty"`
-	SelectedSkillIDs []string    `json:"selected_skill_ids,omitempty"`
+	HTTPClient       *http.Client `json:"-"`
+	WireAuthMethod   string       `json:"-"`
+	WireAuthKey      string       `json:"-"`
+	WireAuthValue    string       `json:"-"`
+	Provider         Provider     `json:"provider"`
+	Conversation     []Message    `json:"conversation"`
+	MCP              []MCPServer  `json:"mcp,omitempty"`
+	SelectedSkillIDs []string     `json:"selected_skill_ids,omitempty"`
 }
 type Provider struct {
-	ID        string `json:"id,omitempty"`
-	Platform  string `json:"platform"`
-	APIKey    string `json:"api_key"`
-	Model     string `json:"model"`
-	BaseURL   string `json:"base_url,omitempty"`
-	MaxTokens int64  `json:"max_tokens,omitempty"`
+	ID          string   `json:"id,omitempty"`
+	Platform    string   `json:"platform"`
+	APIKey      string   `json:"api_key"`
+	Model       string   `json:"model"`
+	BaseURL     string   `json:"base_url,omitempty"`
+	MaxTokens   int64    `json:"max_tokens,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	TopP        *float64 `json:"top_p,omitempty"`
+	TopK        *int     `json:"top_k,omitempty"`
 }
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 type MCPServer struct {
-	ID      string            `json:"id"`
-	URL     string            `json:"url"`
-	Headers map[string]string `json:"headers,omitempty"`
+	Protocol string            `json:"protocol,omitempty"`
+	ID       string            `json:"id"`
+	URL      string            `json:"url"`
+	Headers  map[string]string `json:"headers,omitempty"`
 }
 
 func validateRemoteEndpoint(value string) error {
@@ -82,6 +91,15 @@ func (r State) ValidateModel() error {
 	if strings.TrimSpace(p.Model) == "" || len(p.Model) > 256 {
 		return errors.New("missing or invalid model")
 	}
+	if p.Temperature != nil && (*p.Temperature < 0 || *p.Temperature > 2) {
+		return errors.New("invalid temperature")
+	}
+	if p.TopP != nil && (*p.TopP < 0 || *p.TopP > 1) {
+		return errors.New("invalid top_p")
+	}
+	if p.TopK != nil && (*p.TopK < 1 || *p.TopK > 1000) {
+		return errors.New("invalid top_k")
+	}
 	if p.MaxTokens < 0 || p.MaxTokens > 131072 {
 		return errors.New("invalid max_tokens")
 	}
@@ -104,6 +122,24 @@ func (r State) ValidateModel() error {
 	return nil
 }
 
+// Unauthorized reports a typed upstream HTTP 401 without exposing provider errors.
+func Unauthorized(err error) bool {
+	var openaiErr *openai.Error
+	if errors.As(err, &openaiErr) && openaiErr.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	var anthropicErr *anthropic.Error
+	if errors.As(err, &anthropicErr) && anthropicErr.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	var googleErr genai.APIError
+	if errors.As(err, &googleErr) && googleErr.Code == http.StatusUnauthorized {
+		return true
+	}
+	var googlePtr *genai.APIError
+	return errors.As(err, &googlePtr) && googlePtr.Code == http.StatusUnauthorized
+}
+
 func Stream(ctx context.Context, state State, onDelta func(string)) error {
 	if err := state.ValidateModel(); err != nil {
 		return err
@@ -121,12 +157,21 @@ func Stream(ctx context.Context, state State, onDelta func(string)) error {
 	return errors.New("unsupported provider")
 }
 
-func streamOpenAIResponses(ctx context.Context, s State, emit func(string)) error {
+// openAIOptions keeps authentication and transport configuration consistent
+// across the Responses and Chat Completions adapters.
+func openAIOptions(s State) []openaioption.RequestOption {
 	options := []openaioption.RequestOption{openaioption.WithAPIKey(s.Provider.APIKey)}
+	if s.HTTPClient != nil {
+		options = append(options, openaioption.WithHTTPClient(s.HTTPClient), openaioption.WithMaxRetries(0))
+	}
 	if s.Provider.BaseURL != "" {
 		options = append(options, openaioption.WithBaseURL(s.Provider.BaseURL))
 	}
-	client := openai.NewClient(options...)
+	return options
+}
+
+func streamOpenAIResponses(ctx context.Context, s State, emit func(string)) error {
+	client := openai.NewClient(openAIOptions(s)...)
 	input := make(responses.ResponseInputParam, 0, len(s.Conversation))
 	for _, m := range s.Conversation {
 		input = append(input, responses.ResponseInputItemParamOfMessage(m.Content, responses.EasyInputMessageRole(m.Role)))
@@ -137,6 +182,12 @@ func streamOpenAIResponses(ctx context.Context, s State, emit func(string)) erro
 	}
 	if s.Provider.MaxTokens > 0 {
 		params.MaxOutputTokens = openai.Int(s.Provider.MaxTokens)
+	}
+	if s.Provider.Temperature != nil {
+		params.Temperature = openai.Float(*s.Provider.Temperature)
+	}
+	if s.Provider.TopP != nil {
+		params.TopP = openai.Float(*s.Provider.TopP)
 	}
 	stream := client.Responses.NewStreaming(ctx, params)
 	defer stream.Close()
@@ -159,11 +210,7 @@ func streamOpenAIResponses(ctx context.Context, s State, emit func(string)) erro
 }
 
 func streamOpenAIChat(ctx context.Context, s State, emit func(string)) error {
-	options := []openaioption.RequestOption{openaioption.WithAPIKey(s.Provider.APIKey)}
-	if s.Provider.BaseURL != "" {
-		options = append(options, openaioption.WithBaseURL(s.Provider.BaseURL))
-	}
-	client := openai.NewClient(options...)
+	client := openai.NewClient(openAIOptions(s)...)
 	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(s.Conversation))
 	for _, m := range s.Conversation {
 		switch m.Role {
@@ -180,6 +227,12 @@ func streamOpenAIChat(ctx context.Context, s State, emit func(string)) error {
 	params := openai.ChatCompletionNewParams{Model: openai.ChatModel(s.Provider.Model), Messages: messages}
 	if s.Provider.MaxTokens > 0 {
 		params.MaxCompletionTokens = openai.Int(s.Provider.MaxTokens)
+	}
+	if s.Provider.Temperature != nil {
+		params.Temperature = openai.Float(*s.Provider.Temperature)
+	}
+	if s.Provider.TopP != nil {
+		params.TopP = openai.Float(*s.Provider.TopP)
 	}
 	stream := client.Chat.Completions.NewStreaming(ctx, params)
 	defer stream.Close()
@@ -201,6 +254,9 @@ func streamOpenAIChat(ctx context.Context, s State, emit func(string)) error {
 
 func streamAnthropic(ctx context.Context, s State, emit func(string)) error {
 	options := []anthropicoption.RequestOption{anthropicoption.WithAPIKey(s.Provider.APIKey)}
+	if s.HTTPClient != nil {
+		options = append(options, anthropicoption.WithHTTPClient(s.HTTPClient), anthropicoption.WithMaxRetries(0))
+	}
 	if s.Provider.BaseURL != "" {
 		options = append(options, anthropicoption.WithBaseURL(s.Provider.BaseURL))
 	}
@@ -243,9 +299,13 @@ func streamAnthropic(ctx context.Context, s State, emit func(string)) error {
 }
 
 func streamGemini(ctx context.Context, s State, emit func(string)) error {
-	cfg := &genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: s.Provider.APIKey}
+	cfg := &genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: s.Provider.APIKey, HTTPClient: s.HTTPClient}
 	if s.Provider.BaseURL != "" {
-		cfg.HTTPOptions = genai.HTTPOptions{BaseURL: s.Provider.BaseURL}
+		cfg.HTTPOptions.BaseURL = s.Provider.BaseURL
+	}
+	if s.HTTPClient != nil {
+		attempts := int32(1)
+		cfg.HTTPOptions.RetryOptions = &genai.HTTPRetryOptions{Attempts: &attempts}
 	}
 	client, err := genai.NewClient(ctx, cfg)
 	if err != nil {
@@ -267,6 +327,18 @@ func streamGemini(ctx context.Context, s State, emit func(string)) error {
 		return errors.New("Gemini requires at least one user/assistant message")
 	}
 	config := &genai.GenerateContentConfig{}
+	if s.Provider.Temperature != nil {
+		v := float32(*s.Provider.Temperature)
+		config.Temperature = &v
+	}
+	if s.Provider.TopP != nil {
+		v := float32(*s.Provider.TopP)
+		config.TopP = &v
+	}
+	if s.Provider.TopK != nil {
+		v := float32(*s.Provider.TopK)
+		config.TopK = &v
+	}
 	if len(system) > 0 {
 		config.SystemInstruction = genai.NewContentFromText(strings.Join(system, "\n"), genai.RoleUser)
 	}

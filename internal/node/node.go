@@ -24,6 +24,11 @@ import (
 	"time"
 
 	"github.com/starfall-org/serverside-generative/internal/agent"
+	"github.com/starfall-org/serverside-generative/internal/catalog"
+	"github.com/starfall-org/serverside-generative/internal/chatsession"
+	"github.com/starfall-org/serverside-generative/internal/chatstore"
+	"github.com/starfall-org/serverside-generative/internal/rpc"
+	"github.com/starfall-org/serverside-generative/internal/storedruntime"
 	"github.com/starfall-org/serverside-generative/internal/terminal"
 )
 
@@ -35,11 +40,15 @@ type Config struct {
 	Advertise       string
 	HTTPListen      string
 	IPCSocket       string
+	DataSocket      string
 	IdentityDir     string
+	DataDir         string
 	Password        string
 	Human           bool
 	HTTPOnly        bool
+	LegacyPairing   bool // explicit, temporary opt-in for old new-client enrollment
 	AllowPublicHTTP bool
+	AllowLocalAPI   bool
 	EnableTerminal  bool
 	TerminalCWD     string
 	EnableAgent     bool
@@ -60,6 +69,7 @@ type HumanInvitation struct {
 type pairEntry struct {
 	ID         string `json:"id"`
 	SecretHash string `json:"secret_hash"`
+	Scope      string `json:"scope,omitempty"`
 }
 type Node struct {
 	Config              Config
@@ -68,12 +78,16 @@ type Node struct {
 	mu                  sync.Mutex
 	tickets             map[[32]byte]time.Time
 	pins                map[[32]byte]time.Time
+	httpPairCodes       map[[32]byte]httpPairCode
 	pairs               map[string]pairEntry
 	attempts            map[string]*attempt
 	sessions            map[string]*Session
 	shared              syncedContext
 	activeConnection    map[string]uint64
 	nextConnectionEpoch uint64
+	rpc                 *rpc.Dispatcher
+	tokens              map[[32]byte]apiToken
+	nativeReceipts      map[string]*nativeReceipt
 	Terminals           *terminal.Manager
 	Agents              *agent.Manager
 }
@@ -175,14 +189,39 @@ func New(c Config) (*Node, error) {
 		}
 		c.IdentityDir = filepath.Join(base, "serverside-generative")
 	}
+	if c.DataDir == "" {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			return nil, err
+		}
+		c.DataDir = filepath.Join(base, "serverside")
+	}
 	if c.IPCSocket == "" {
 		c.IPCSocket = filepath.Join(c.IdentityDir, "control.sock")
+	}
+	if c.DataSocket == "" {
+		c.DataSocket = filepath.Join(c.IdentityDir, "run", "data.sock")
 	}
 	cert, fp, err := loadOrCreateIdentity(c.IdentityDir)
 	if err != nil {
 		return nil, err
 	}
-	n := &Node{Config: c, Certificate: cert, Fingerprint: fp, tickets: make(map[[32]byte]time.Time), pins: make(map[[32]byte]time.Time), pairs: make(map[string]pairEntry), attempts: make(map[string]*attempt), sessions: make(map[string]*Session), activeConnection: make(map[string]uint64)}
+	n := &Node{Config: c, Certificate: cert, Fingerprint: fp, tickets: make(map[[32]byte]time.Time), pins: make(map[[32]byte]time.Time), httpPairCodes: make(map[[32]byte]httpPairCode), pairs: make(map[string]pairEntry), attempts: make(map[string]*attempt), sessions: make(map[string]*Session), activeConnection: make(map[string]uint64)}
+	sessionsV5 := chatsession.New(chatstore.New(c.DataDir))
+	sessionsV5.AllowLocalAPI(c.AllowLocalAPI)
+	sessionsV5.SetStoredResolver(func(raw json.RawMessage) (json.RawMessage, error) { return storedruntime.Resolve(c.DataDir, raw) })
+	sessionsV5.SetStoredMCPResolver(func(raw, conversation json.RawMessage, server string) (json.RawMessage, error) {
+		return storedruntime.ResolveMCP(c.DataDir, raw, conversation, server)
+	})
+	sessionsV5.SetStoredToolResolver(func(raw json.RawMessage) (json.RawMessage, error) {
+		return storedruntime.ResolveCustomTools(c.DataDir, raw)
+	})
+	n.rpc = rpc.New(sessionsV5)
+	n.rpc.SetCatalog(catalog.New(c.DataDir))
+	n.rpc.SetNative(n.nativeRPC)
+	n.rpc.SetCapabilities(func() any { return n.capabilities() })
+	n.nativeReceipts = make(map[string]*nativeReceipt)
+	n.tokens = make(map[[32]byte]apiToken)
 	data, err := os.ReadFile(filepath.Join(c.IdentityDir, "clients.json"))
 	if err == nil {
 		var pairs []pairEntry
@@ -296,6 +335,9 @@ func (n *Node) checkPassword(password string) bool {
 	return subtle.ConstantTimeCompare(want[:], got[:]) == 1
 }
 func (n *Node) pairWithTicket(ticket, pin string) (string, string, error) {
+	return n.pairWithTicketScope(ticket, pin, "")
+}
+func (n *Node) pairWithTicketScope(ticket, pin, scope string) (string, string, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	now := time.Now()
@@ -317,6 +359,9 @@ func (n *Node) pairWithTicket(ticket, pin string) (string, string, error) {
 	if !matched {
 		return "", "", errors.New("invalid or expired pairing credential")
 	}
+	return n.createPairLocked(scope)
+}
+func (n *Node) createPairLocked(scope string) (string, string, error) {
 	id, err := RandomToken(16)
 	if err != nil {
 		return "", "", err
@@ -326,18 +371,31 @@ func (n *Node) pairWithTicket(ticket, pin string) (string, string, error) {
 		return "", "", err
 	}
 	sum := sha256.Sum256([]byte(secret))
-	n.pairs[id] = pairEntry{ID: id, SecretHash: hex.EncodeToString(sum[:])}
+	n.pairs[id] = pairEntry{ID: id, SecretHash: hex.EncodeToString(sum[:]), Scope: scope}
 	if err = n.persistPairsLocked(); err != nil {
 		delete(n.pairs, id)
 		return "", "", err
 	}
 	return id, secret, nil
 }
+func (n *Node) pairTCP() (map[string]any, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	id, secret, err := n.createPairLocked("tcp")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"protocol": 5, "client_id": id, "secret": secret, "fingerprint": n.Fingerprint, "endpoint": n.Config.Advertise, "transport": "tcp"}, nil
+}
+
 func (n *Node) verifyPair(id, secret string) bool {
+	return n.verifyPairFor(id, secret, "")
+}
+func (n *Node) verifyPairFor(id, secret, scope string) bool {
 	n.mu.Lock()
 	pair, ok := n.pairs[id]
 	n.mu.Unlock()
-	if !ok {
+	if !ok || (scope != "" && pair.Scope != "" && pair.Scope != scope) {
 		return false
 	}
 	sum := sha256.Sum256([]byte(secret))
@@ -357,6 +415,12 @@ func (n *Node) revokePair(id string) error {
 		return err
 	}
 	delete(n.activeConnection, id)
+	for key := range n.nativeReceipts {
+		if strings.HasPrefix(key, id+"\x00") {
+			delete(n.nativeReceipts, key)
+		}
+	}
+	n.rpc.Revoke(id)
 	for key, session := range n.sessions {
 		if session.Owner != id {
 			continue
@@ -371,6 +435,9 @@ func (n *Node) revokePair(id string) error {
 	return nil
 }
 func (n *Node) Close() {
+	if n.rpc != nil {
+		n.rpc.Revoke("")
+	}
 	if n.Agents != nil {
 		n.Agents.CloseAll()
 	}

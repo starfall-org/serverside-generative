@@ -138,7 +138,6 @@ def auth_socket(
     creds: dict[str, Any] | None = None,
     context_override: dict[str, Any] | None = None,
 ) -> tuple[ssl.SSLSocket, dict[str, Any]]:
-    sock = secure_socket(invite["endpoint"], invite["fingerprint"])
     if creds:
         auth = {"type": "auth", "client_id": creds["client_id"], "secret": creds["secret"]}
     else:
@@ -149,6 +148,7 @@ def auth_socket(
             auth["pin"] = invite["pin"]
         else:
             raise ValueError("Missing ticket or manual PIN")
+    sock = secure_socket(invite["endpoint"], invite["fingerprint"])
     try:
         write_frame(sock, auth)
         result = read_frame(sock)

@@ -23,7 +23,13 @@ type handshakeRequest struct {
 
 func (n *Node) HTTPHandler() http.Handler {
 	mux := http.NewServeMux()
+	n.registerV5(mux)
+	registerWeb(mux)
 	mux.HandleFunc("POST /v1/handshake", func(w http.ResponseWriter, r *http.Request) {
+		if !n.Config.LegacyPairing {
+			http.Error(w, "legacy pairing disabled: use SSH for TCP or URL for HTTP/WS", http.StatusGone)
+			return
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		if r.ContentLength > 4096 {
 			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
@@ -57,6 +63,10 @@ func (n *Node) HTTPHandler() http.Handler {
 	})
 	if !n.Config.HTTPOnly {
 		mux.HandleFunc("GET /v1/handshake/ws", func(w http.ResponseWriter, r *http.Request) {
+			if !n.Config.LegacyPairing {
+				http.Error(w, "legacy pairing disabled", http.StatusGone)
+				return
+			}
 			host, _, _ := net.SplitHostPort(r.RemoteAddr)
 			if n.blocked("ws:" + host) {
 				http.Error(w, "rate limited", 429)
@@ -130,14 +140,47 @@ func (n *Node) handleIPC(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	var input struct {
-		Method string `json:"method"`
+		Method   string `json:"method"`
+		Endpoint string `json:"endpoint"`
+		Pin      string `json:"pin"`
 	}
 	if err := json.NewDecoder(io.LimitReader(conn, 4096)).Decode(&input); err != nil {
 		return
 	}
 	encoder := json.NewEncoder(conn)
 	switch input.Method {
+	case "pair_http_cancel":
+		n.mu.Lock()
+		count := len(n.httpPairCodes)
+		clear(n.httpPairCodes)
+		n.mu.Unlock()
+		_ = encoder.Encode(map[string]int{"cancelled": count})
+	case "pair_http":
+		result, err := n.issueHTTPPairURL(input.Endpoint, input.Pin)
+		if err != nil {
+			_ = encoder.Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = encoder.Encode(result)
+	case "pair_http_local":
+		result, err := n.issueLocalPairCode()
+		if err != nil {
+			_ = encoder.Encode(map[string]string{"error": "pairing failed"})
+			return
+		}
+		_ = encoder.Encode(result)
+	case "pair_tcp":
+		result, err := n.pairTCP()
+		if err != nil {
+			_ = encoder.Encode(map[string]string{"error": "pairing failed"})
+			return
+		}
+		_ = encoder.Encode(result)
 	case "ticket":
+		if !n.Config.LegacyPairing {
+			_ = encoder.Encode(map[string]string{"error": "legacy ticket pairing disabled; use pair --stdio --transport tcp"})
+			return
+		}
 		result, err := n.IssueTicket()
 		if err != nil {
 			_ = encoder.Encode(map[string]string{"error": err.Error()})
@@ -145,6 +188,10 @@ func (n *Node) handleIPC(conn net.Conn) {
 		}
 		_ = encoder.Encode(result)
 	case "human":
+		if !n.Config.LegacyPairing {
+			_ = encoder.Encode(map[string]string{"error": "legacy QR/PIN pairing disabled; use HTTP/WS URL or SSH TCP pairing"})
+			return
+		}
 		result, err := n.IssueHuman()
 		if err != nil {
 			_ = encoder.Encode(map[string]string{"error": err.Error()})
@@ -184,13 +231,16 @@ func StartIPCSocket(path string) (net.Listener, error) {
 	return listener, nil
 }
 func ControlRequest(path, method string) (json.RawMessage, error) {
+	return ControlRequestFields(path, map[string]string{"method": method})
+}
+func ControlRequestFields(path string, input map[string]string) (json.RawMessage, error) {
 	conn, err := net.DialTimeout("unix", path, 3*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("connect to running daemon: %w", err)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
-	if err = json.NewEncoder(conn).Encode(map[string]string{"method": method}); err != nil {
+	if err = json.NewEncoder(conn).Encode(input); err != nil {
 		return nil, err
 	}
 	var result json.RawMessage

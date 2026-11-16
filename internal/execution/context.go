@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -129,22 +130,14 @@ func (ctx ClientContext) Validate() error {
 }
 
 func (ctx ClientContext) Clone() ClientContext {
-	copyCtx := ClientContext{Instructions: ctx.Instructions}
-	// Preserve the difference between nil (JSON null) and an allocated empty
-	// slice (JSON []); the digest must remain stable across RAM/disk copies.
-	if ctx.Skills != nil {
-		copyCtx.Skills = make([]AgentSkill, len(ctx.Skills))
-		copy(copyCtx.Skills, ctx.Skills)
+	copyCtx := ClientContext{
+		Instructions: ctx.Instructions,
+		Skills:       slices.Clone(ctx.Skills),
+		Providers:    slices.Clone(ctx.Providers),
 	}
-	if ctx.Providers != nil {
-		copyCtx.Providers = make([]ProviderMetadata, len(ctx.Providers))
-		copy(copyCtx.Providers, ctx.Providers)
-	}
+	// Clone preserves nil versus empty slices, which affects the digest.
 	for i := range copyCtx.Providers {
-		if ctx.Providers[i].Models != nil {
-			copyCtx.Providers[i].Models = make([]string, len(ctx.Providers[i].Models))
-			copy(copyCtx.Providers[i].Models, ctx.Providers[i].Models)
-		}
+		copyCtx.Providers[i].Models = slices.Clone(ctx.Providers[i].Models)
 	}
 	return copyCtx
 }

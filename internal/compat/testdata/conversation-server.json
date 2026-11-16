@@ -1,0 +1,125 @@
+{
+  "id": "server-fixture",
+  "title": "Fidelity",
+  "created_at": 1710000000000,
+  "updated_at": 1710000001000,
+  "messages": [
+    {
+      "id": "user-1",
+      "role": "user",
+      "versions": [
+        {
+          "content": "Question",
+          "timestamp": "1710000000000",
+          "files": [
+            "tool-file:opaque-user"
+          ],
+          "toolActivity": [],
+          "reasoning_content": null,
+          "reasoning_signature": null,
+          "processing_finished_at": null,
+          "provider_id": "provider-1",
+          "model_id": "org/model:1",
+          "model_display_name": "Model",
+          "generation_interrupted": false,
+          "generation_error": null,
+          "context_usage": null,
+          "create_skill_requested": false,
+          "selected_skill_name": null,
+          "reasoning_content_offset": 0,
+          "files_content_offset": null,
+          "media_content_offsets": [],
+          "block_order": []
+        }
+      ],
+      "active_version_index": 0
+    },
+    {
+      "id": "model-1",
+      "role": "model",
+      "versions": [
+        {
+          "content": "",
+          "timestamp": "1710000000100",
+          "files": [
+            "tool-file:opaque-result"
+          ],
+          "toolActivity": [
+            {
+              "id": "tool-1",
+              "name": "lookup",
+              "wireName": "http_lookup",
+              "status": "success",
+              "summary": "",
+              "arguments": "{\"q\":\"term\"}",
+              "response": "{\"items\":[]}",
+              "files": [
+                "tool-file:opaque-result"
+              ],
+              "contentOffset": 0
+            }
+          ],
+          "reasoning_content": "reasoning",
+          "reasoning_signature": "opaque-signature",
+          "processing_finished_at": "1710000000200",
+          "provider_id": "provider-1",
+          "model_id": "org/model:1",
+          "model_display_name": "Model",
+          "generation_interrupted": false,
+          "generation_error": null,
+          "context_usage": {
+            "input_tokens": 123,
+            "output_tokens": 45
+          },
+          "create_skill_requested": true,
+          "selected_skill_name": "skill-a",
+          "reasoning_content_offset": 0,
+          "files_content_offset": 0,
+          "media_content_offsets": [
+            0
+          ],
+          "block_order": [
+            "reasoning",
+            "tool",
+            "files"
+          ],
+          "future_version_field": {
+            "large": 9007199254740993
+          }
+        },
+        {
+          "content": "Alternative",
+          "timestamp": "1710000000300",
+          "files": [],
+          "toolActivity": [],
+          "reasoning_content": null,
+          "generation_interrupted": true,
+          "generation_error": "interrupted",
+          "future_version_field": null
+        }
+      ],
+      "active_version_index": 1
+    }
+  ],
+  "token_count": 168,
+  "provider_id": "provider-1",
+  "model_id": "org/model:1",
+  "profile_id": null,
+  "summary": {
+    "id": "summary-1",
+    "content": "Prior context",
+    "through_message_id": "user-1",
+    "created_at": 1710000000400,
+    "role": "SYSTEM"
+  },
+  "reasoning_effort": null,
+  "selected_prompt_ids": [],
+  "remote_workspaces": {
+    "machine": "/workspace"
+  },
+  "server_fixture_extension": {
+    "null": null,
+    "empty": [],
+    "large": 9007199254740993
+  }
+}

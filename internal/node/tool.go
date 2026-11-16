@@ -28,41 +28,38 @@ func (n *Node) builtinTools() []BuiltinTool {
 			InputSchema: map[string]any{"type": "object"}},
 	}
 }
-func (n *Node) handleTerminal(p *peer, msg Message) {
+func (n *Node) terminalAction(msg Message) (any, error) {
 	mgr := n.Terminals
 	if mgr == nil {
-		p.error(errors.New("terminal tools disabled; start server with --enable-terminal"))
-		return
+		return nil, errors.New("terminal tools disabled; start server with --enable-terminal")
 	}
 	switch msg.Type {
 	case "terminal_create":
 		id, err := mgr.Create(msg.Rows, msg.Cols)
 		if err != nil {
-			p.error(err)
-			return
+			return nil, err
 		}
-		_ = p.send(map[string]any{"type": "terminal_created", "terminal_id": id})
+		return map[string]any{"type": "terminal_created", "terminal_id": id}, nil
 	case "terminal_execute":
-		result, err := mgr.Execute(msg.TerminalID, msg.Command, msg.WaitMS)
-		if err != nil {
-			p.error(err)
-			return
-		}
-		_ = p.send(result)
+		return mgr.Execute(msg.TerminalID, msg.Command, msg.WaitMS)
 	case "terminal_read":
-		result, err := mgr.Read(msg.TerminalID, msg.Offset, msg.MaxBytes, msg.WaitMS)
-		if err != nil {
-			p.error(err)
-			return
-		}
-		_ = p.send(result)
+		return mgr.Read(msg.TerminalID, msg.Offset, msg.MaxBytes, msg.WaitMS)
 	case "terminal_close":
 		if err := mgr.Close(msg.TerminalID); err != nil {
-			p.error(err)
-			return
+			return nil, err
 		}
-		_ = p.send(map[string]any{"type": "terminal_closed", "terminal_id": msg.TerminalID})
+		return map[string]any{"type": "terminal_closed", "terminal_id": msg.TerminalID}, nil
 	case "terminal_list":
-		_ = p.send(map[string]any{"type": "terminal_list", "terminals": mgr.List(), "max_terminals": terminal.MaxTerminals})
+		return map[string]any{"type": "terminal_list", "terminals": mgr.List(), "max_terminals": terminal.MaxTerminals}, nil
+	default:
+		return nil, errors.New("unknown terminal action")
 	}
+}
+func (n *Node) handleTerminal(p *peer, msg Message) {
+	result, err := n.terminalAction(msg)
+	if err != nil {
+		p.error(err)
+		return
+	}
+	_ = p.send(result)
 }

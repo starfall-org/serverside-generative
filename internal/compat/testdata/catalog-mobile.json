@@ -1,0 +1,57 @@
+{
+  "provider": {
+    "id": "provider-a",
+    "name": "Provider",
+    "type": "openai",
+    "baseUrl": "https://api.example.invalid/v1",
+    "config": {
+      "modelIds": []
+    },
+    "groupId": "group-a",
+    "isHidden": true
+  },
+  "provider_null": {
+    "id": "provider-b",
+    "name": "Provider 2",
+    "type": "google",
+    "baseUrl": ""
+  },
+  "group": {
+    "id": "group-a",
+    "name": "Group"
+  },
+  "model": {
+    "id": "org/model",
+    "display_name": "Model",
+    "provider_id": "provider-a"
+  },
+  "model_config": {
+    "displayName": "Model",
+    "modelType": "IMAGE_GENERATION",
+    "mediaApiType": "custom"
+  },
+  "mcp": {
+    "id": "server-a",
+    "name": "Server",
+    "protocol": "sse",
+    "cachedTools": []
+  },
+  "chat_profile": {
+    "id": "profile-a",
+    "name": "Research",
+    "config": {
+      "system_prompt": "Helpful"
+    }
+  },
+  "media_profile": {
+    "id": "media-a",
+    "name": "Custom Image",
+    "requiresModel": false
+  },
+  "tool_settings": {
+    "quickMcp": {
+      "server-a": true
+    },
+    "sendFileEnabled": false
+  }
+}

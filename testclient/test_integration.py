@@ -12,6 +12,8 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.request
+import urllib.error
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import client  # noqa: E402
@@ -31,7 +33,8 @@ def open_port() -> int:
 
 class ServerRunner:
     def __init__(self, root: Path, *, http_only: bool = False, password: str = PASSWORD,
-                 enable_terminal: bool = False, terminal_cwd: str | None = None):
+                 enable_terminal: bool = False, terminal_cwd: str | None = None,
+                 allow_local_api: bool = False, data_socket: Path | None = None):
         self.root = root
         self.tcp_port, self.http_port = open_port(), open_port()
         self.ipc = root / "control.sock"
@@ -39,6 +42,8 @@ class ServerRunner:
         self.http_only = http_only
         self.enable_terminal = enable_terminal
         self.terminal_cwd = terminal_cwd
+        self.allow_local_api = allow_local_api
+        self.data_socket = data_socket
         self.process: subprocess.Popen | None = None
         self.log_file = None
 
@@ -54,10 +59,16 @@ class ServerRunner:
             "--advertise", f"127.0.0.1:{self.tcp_port}",
             "--http-listen", f"127.0.0.1:{self.http_port}",
             "--identity-dir", str(self.root),
+            "--data-dir", str(self.root / "data"),
             "--ipc", str(self.ipc),
+            "--allow-legacy-pairing",  # explicit v4 migration suite only
         ]
+        if self.data_socket:
+            args.extend(["--data-socket", str(self.data_socket)])
         if self.http_only:
             args.append("--http-only")
+        if self.allow_local_api:
+            args.append("--allow-local-api")
         if self.enable_terminal:
             args.append("--enable-terminal")
         if self.terminal_cwd:
@@ -76,9 +87,7 @@ class ServerRunner:
                 sock = socket.create_connection(("127.0.0.1", self.tcp_port), timeout=.15)
                 sock.close()
                 if self.ipc.exists():
-                    if not self.password:
-                        return
-                    # TCP can be ready before the HTTP/WS handshake listener.
+                    # TCP can be ready before the HTTP/WS data listener.
                     try:
                         check = socket.create_connection(("127.0.0.1", self.http_port), timeout=.15)
                     except OSError:
@@ -247,9 +256,22 @@ class PasswordlessSSH(unittest.TestCase):
             runner.start()
             try:
                 self.assertIsNone(runner.process.poll())
-                # The HTTP handshake is disabled, not secretly exposed without auth.
-                with self.assertRaises(OSError):
-                    socket.create_connection(("127.0.0.1", runner.http_port), timeout=.2)
+                # The data API remains available to paired clients without a
+                # pairing password; the password-based invitation is disabled.
+                deadline = time.monotonic() + 5
+                while True:
+                    try:
+                        with urllib.request.urlopen(runner.url + "/v1/capabilities", timeout=.5) as response:
+                            self.assertEqual(json.load(response)["protocol"], 5)
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(.05)
+                request = urllib.request.Request(runner.url + "/v1/handshake", data=b'{"password":""}', method="POST")
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(request, timeout=2)
+                self.assertEqual(rejected.exception.code, 401)
                 command = f"{BINARY} handshake --stdio --ipc {runner.ipc}"
                 invite = client.handshake_ssh(command)
                 self.assertTrue(invite["ticket"])
@@ -259,8 +281,7 @@ class PasswordlessSSH(unittest.TestCase):
                     "SSH-only pairing without application password"
                 )
                 output = (runner.root / "daemon-test-log.txt").read_text()
-                self.assertIn("no password; SSH/Human Relay available", output)
-                self.assertNotIn("HTTP/WS handshake: 127.0.0.1", output)
+                self.assertIn("HTTP/WS API:", output)
             finally:
                 runner.stop()
 

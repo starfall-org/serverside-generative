@@ -1,146 +1,130 @@
 # serverside-generative
 
-A self-hosted Go CLI session runtime for Generative Android. Execution jobs and API keys remain in RAM; the owner's shared instructions, Agent Skills and non-secret provider catalog are persisted in one private JSON configuration. No Go toolchain, database service, Firebase, or broker is needed at deployment.
+Self-hosted Go session runtime offering one v5 JSON RPC API over TLS/TCP, SSH stdio, WebSocket and HTTP/SSE. Its wire format is designed for prospective Generative-compatible clients, **but no Kotlin/Android app integration has been authorized or implemented**. `~/generative` remains untouched.
 
-> **Current status: Go SDK-backed remote execution alpha.** The server can stream text from OpenAI Responses, OpenAI Chat Completions (including compatible endpoints), Google Gemini, and Anthropic Claude, and can explicitly list/call Streamable HTTP MCP tools. It does **not** yet support autonomous model tool loops, Android integration, multimodal requests, or NAT hole punching.
+## Architecture and pairing
 
-**Independent structured coding-agent support:** Enable `--enable-agent` to let paired clients directly control Claude Code, Codex and OpenCode over their native bidirectional/JSON-RPC/HTTP+SSE protocols, with separate session state and structured content/reasoning/tool/approval events. `agent.type` is required; `agent.binary` is optional for forks. This is not a model tool or a terminal-scraping feature. See [Structured coding-agent sessions](docs/structured-agents.md).
+**Current v5 policy (2026-11-15): every conversation is permanently saved in a private per-chat JSON file on the server, regardless of any mobile application's local sync setting.** The server neither requires nor interprets a mobile `memory/sync` chat choice; older `data.storage` values are ignored. `session.open/get` return the complete stored conversation and revision, and `conversation` events push snapshots after durable changes, alongside model/tool progress events. A lost event can be recovered from server storage with `session.get`.
 
-## Architecture
+**Only mobile-supplied model provider/MCP/tool runtime settings are temporary RAM data.** They are never written into YAML, encrypted SQLite, chat JSON or backups, and disappear on session close, TTL expiry or server restart. Locally managed server providers and encrypted server-managed credentials are a separate explicit `runtime.source="stored"` configuration.
 
-- **Handshake / pairing** establishes a short-lived ticket and pins the server's TLS certificate.
-- **Data transport** is direct TLS 1.3 over TCP, with 4-byte big-endian length-prefixed JSON frames (max 4 MiB). The framing can later evolve to Protobuf without changing the handshake channels.
-- **Persistent reconnect identity** is a randomly generated 256-bit client secret; the server stores only its SHA-256 hash (0600). Android / testclient stores the secret locally (0600).
-- **One shared configuration for a personal server**: all paired devices see the same instructions, Agent Skills, base URLs and model catalogs. The server stores one private JSON file, not separate copies per client. Pairing itself is per device; shared configuration is per server.
-- **Optimistic configuration sync**: each connection confirms the current SHA-256 digest, fetches server changes, or updates the shared configuration with an expected revision. Concurrent/stale device writes are rejected rather than silently overwriting another device's edits.
-- **Ephemeral execution** keeps in-progress chat turns, pending events, API keys, MCP auth headers and running jobs in RAM. No session execution state, API credential, conversation transcript or model output is written to disk by this application.
-- **Reconnect** uses the saved client ID and secret to reauthenticate directly over TLS, without repeating SSH / HTTP / QR. Client sends `sync` and the last locally committed sequence; only missing events are returned.
-- **ACK** from Android is sent only **after** local persistence succeeds; ACK removes consumed event data from server RAM. Gaps are explicit errors, not silent data loss.
-- **Restart** preserves instructions, skills, provider URL/model catalogs, TLS identity, and pairing hashes. It loses running jobs and pending chat results. Android re-handoffs active sessions, but does not need to upload unchanged configuration again.
+Server-side features also include a revisioned YAML catalog, encrypted server credentials and custom tools, supported model text-streaming adapters, authorization-controlled MCP/custom HTTP tools, and optional terminal/coding-agent tools. Some providers, built-in settings and media execution flows remain incomplete.
 
-### Important network limitation
+See [server implementation plans](plans/README.md), [v5 API contract](docs/client-api-surface.md), and [design-only future interface diagrams](docs/future-generative-interface.md).
 
-**Pairing is not NAT traversal.** This MVP connects to a reachable TCP endpoint and does *not* implement TCP simultaneous-open/hole punching, STUN, TURN, a relay, or automatic address discovery. SSH/HTTP can carry the pairing ticket and be closed afterwards, but the separate TLS/TCP endpoint must remain reachable. Human Relay requires out-of-band transfer of a QR/code and a reachable TCP transport; a QR alone cannot traverse two restrictive NATs.
+| Client connection type | One-time pairing | Subsequent data traffic |
+| --- | --- | --- |
+| **TCP** | **SSH only:** `ssh -T USER@HOST serverside pair --stdio --transport tcp`. Strict SSH host-key verification required. Result contains durable `client_id`, secret, TLS certificate SHA-256 fingerprint and the direct TCP address. | TLS/TCP on the configured port, with the same identity also valid over **SSH stdio fallback** when a future client implements TCP reachability fallback. No new pairing on reconnect. |
+| **HTTP / WebSocket** | **One HTTPS pairing URL**, shown as selectable/copyable text **and** an identical optional QR. The URL's fragment contains a short-lived one-time code and client-visible SPKI pin. Future clients may copy/open/scan it, validate HTTPS/SPKI and redeem the code through `POST /v1/pair` to obtain durable `client_id` and secret. | HTTPS `/v1/auth` yields a short-lived bearer token for `/v1/rpc` and `/v1/events`; or use authenticated `/v1/ws` for full two-way RPC/events. The same HTTP/WS identity authorizes both; it does **not** authorize direct TCP or SSH. |
 
-## Install (no Go required on the server)
+**QR is not required and is not a different credential or handshake from the displayed URL.** Copying the full URL (including fragment) and scanning its QR must give the same result. Do not place persistent device secrets in URLs or QR. A QR URL code is single-use and expires; protect it as you would a temporary login link.
 
-Download the prebuilt `serverside` CLI for your OS/CPU from the repository CI artifacts or a tagged release. On Linux:
+The server needs a reachable SSH service for SSH pairing or fallback; it does **not** embed an SSH daemon or need a public Generative-specific TCP port for SSH stdio. The SSH command `serverside stream --stdio` forwards binary protocol-v5 frames to the **running daemon's private Unix data socket**, not through SSH port forwarding or a second server. The daemon still verifies the paired device identity. TCP fallback is only attempted on reachability failures, not on a rejected TLS certificate or authorization failure. WSS and HTTPS share one HTTP/WS-scoped identity. A future client may fall back to HTTPS RPC/polling on unreachable WSS, but must not downgrade on TLS or authorization failures. The server supports interrupted-stream recovery with event cursors; no Android-side automatic migration has been implemented. Never blindly replay a possibly executed model/tool request after disconnection.
 
-```bash
-chmod +x serverside
+**New-device legacy pairing is disabled by default:** `POST /v1/handshake`, `GET /v1/handshake/ws`, Human Relay PIN/QR and v4 TCP ticket enrollment cannot create new identities. Existing already-paired v4 clients continue to work. An explicit **temporary migration flag** `--allow-legacy-pairing` enables the old enrollment methods for old clients; remove the flag after migration. Password handshake alone does not replace the new connection-type-specific flows.
+
+### Persistence and features
+
+- `~/.config/serverside-generative/`: TLS certificate/key, per-client secret hashes, Unix `control.sock` and daemon `run/data.sock` (private filesystem permissions).
+- `~/.config/serverside/` (or `XDG_CONFIG_HOME/serverside/`): revisioned nonsecret `providers.yaml`, `models.yaml`, `mcp.yaml`, `profiles.yaml`; encrypted secret/custom-tool SQLite; **`chats/*.json` for every v5 conversation**. Existing `shared-config.json` remains available for old clients until explicitly migrated.
+- OAuth login/refresh, image/video/music binary generation/file storage, and other unsupported adapters are not silently implemented. Unsupported operations return explicit errors.
+- Terminal and coding-agent RPC operations are **opt-in** via `--enable-terminal` / `--enable-agent`; authorization is independent from ordinary model tools.
+- Metadata edits use a shared validation/CAS path; `config import`, `config diff` and the terminal `manage` editor do not bypass YAML secret restrictions. API keys/custom HTTP tools use encrypted SQLite; live mobile runtime secrets must never enter stored YAML or permanently stored chat JSON.
+
+## Web chat client
+
+The HTTP listener serves the embedded chat client at `/` and `/connect`. Start `serverside serve`, then run `serverside pair --stdio --transport http-local` on the server and enter the one-time code at `http://127.0.0.1:7091/`. The code is redeemable only from the local machine. The browser stores the paired credential in local storage so it can reopen the same chat history; disconnecting clears it. Use a trusted browser profile.
+
+Select a server-managed provider/model or enter temporary provider credentials in the Model settings. Chats are stored on the server. Temporary provider credentials stay in browser and server memory. To access the web client remotely, use the HTTPS pairing URL and a trusted reverse proxy; the browser cannot independently verify the SPKI pin shown in the invitation.
+
+The built client is checked in under `internal/node/web` and embedded in the Go binary. To modify it, run `npm ci --prefix web`, `npm run build --prefix web`, then `go build -o serverside ./cmd/serverside-generative`.
+
+## Install (no Go toolchain required on the deployed server)
+
+Download a prebuilt `serverside` CLI from CI or a release, or build from source using Go 1.26.10+:
+
+```sh
+go build -trimpath -ldflags='-s -w' -o serverside ./cmd/serverside-generative
 ./serverside version
 ```
 
-To build **as a developer**, install Go 1.26.10+ and run:
+### Start the daemon
 
-```bash
-go build -trimpath -ldflags='-s -w' -o serverside ./cmd/serverside-generative
-```
-
-### Start the server
-
-**SSH-only pairing needs no `GENERATIVE_HANDSHAKE_PASSWORD` and no HTTP/WS listener:**
-
-```bash
-./serverside serve --http-listen off \\
-  --tcp-listen 0.0.0.0:7090 \\
-  --advertise server.example.com:7090
-```
-
-Use your preconfigured OpenSSH public-key login and run `serverside handshake --stdio` on that server (see the SSH section below). The SSH command returns an ephemeral invitation; the Android/Python client subsequently connects to the **separate TLS/TCP data port**.
-
-For QR/PIN-only pairing, no application password is required either:
-
-```bash
-./serverside serve --http-listen off --human
-```
-
-For HTTP/WS pairing, configure a handshake password:
-
-```bash
-export GENERATIVE_HANDSHAKE_PASSWORD='replace-with-a-long-random-password'
-./serverside serve
-```
-
-For another device on a reachable network with HTTP/WS pairing:
-
-```bash
-export GENERATIVE_HANDSHAKE_PASSWORD='replace-with-a-long-random-password'
+```sh
 ./serverside serve \
   --tcp-listen 0.0.0.0:7090 \
   --advertise server.example.com:7090 \
-  --http-listen 127.0.0.1:7091 \
-  --human
+  --http-listen 127.0.0.1:7091
 ```
 
-`--advertise` must name an address **reachable by the client**, not `0.0.0.0`. Never expose the plaintext HTTP handshake listener to the public Internet. Put it behind a properly authenticated HTTPS/WSS TLS-terminating reverse proxy, or use SSH/Human pairing instead. The TCP data channel uses pinned TLS 1.3.
+Use a correctly configured **HTTPS reverse proxy** for clients reaching HTTP/WS from another machine. Public plaintext data requests are refused; localhost HTTP is intended for trusted local proxies. The HTTP/WS listener does not need a pairing password for URL/QR onboarding or regular v5 data API access. To use only direct SSH/TCP, add `--http-listen off`.
 
-The server stores these files under `~/.config/serverside-generative/` (private directory and file permissions):
+### One-time TCP pairing over SSH
 
-| File | Purpose |
-| --- | --- |
-| `identity.key`, `identity.crt` | Long-lived TLS identity (so reconnect does not require approving a new fingerprint) |
-| `clients.json` | Client IDs and **hashes** of client reconnect secrets |
-| `control.sock` | Unix socket (only while server is running) |
-| `shared-config.json` | One shared durable configuration for all paired clients: instructions, Agent Skills (SKILL.md text), provider IDs/base URLs/model catalog. Private file, mode 0600 |
-
-**No API keys, authorization tokens, or MCP credential headers are persisted.** Provider metadata has a strict schema and rejects API key fields and base URLs containing query parameters. Chat execution state and event buffers remain in RAM. Clients must never include credentials in instruction/skill text or model names because these *are intentionally persisted*. OS swap, core dumps, and external provider logs should still be controlled to prevent sensitive RAM data from reaching disk.
-
-## Handshake: three interchangeable methods
-
-### 1. SSH (no application password)
-
-The client uses a previously trusted SSH host and public-key login; the SSH session runs a one-shot CLI command through a permission-limited local Unix socket:
-
-```bash
-ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes user@server \
-  serverside handshake --stdio
+```sh
+ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes USER@HOST \
+  serverside pair --stdio --transport tcp
 ```
 
-The response is a short-lived JSON invitation. SSH can close immediately; the client uses its ticket to establish the **separate direct TLS/TCP** transport. The server runs no embedded SSH daemon; install/configure OpenSSH and authorized keys separately. Without a reachable SSH path, this handshake cannot work.
+It emits one JSON object containing `client_id`, `secret`, `fingerprint`, `endpoint` and `transport:"tcp"`. A future client must store the paired secret in a platform-protected credential store. Subsequent TLS/TCP connections authenticate with that pair, and SSH fallback uses the same pair:
 
-Python test client:
-
-```bash
-python3 testclient/client.py pair --method ssh --ssh-target user@server --state client-state.json
+```sh
+ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes USER@HOST serverside stream --stdio
 ```
 
-### 2. HTTP / WebSocket (password required)
+Use `--data-socket PATH` for a non-default daemon socket. Never allocate a PTY or pass client secrets in SSH argv. Only trusted SSH users should be able to run the pairing command. TCP pairing **does not** use a QR, HTTP request or PIN.
 
-Only the HTTP/WS pairing method requires `GENERATIVE_HANDSHAKE_PASSWORD` (at least 12 characters) or `--password` (environment variable is safer: command-line arguments may be visible in process listings). Without a password the HTTP/WS listener is automatically disabled, even if `--http-listen` has its default value. SSH and Human Relay continue to work normally. Client tries:
+### One URL for HTTP and WebSocket pairing
 
-1. `GET /v1/handshake/ws`: WebSocket upgrade + password in JSON message;
-2. if WS is unsupported: `POST /v1/handshake`: password in JSON body.
+The server must already be running with a reachable `https://` hostname and valid client-visible TLS identity. Run on the server (or a trusted shell session):
 
-Bad credentials never trigger a fallback attempt. HTTP always returns a short-lived invitation; neither method transports session data.
-
-```bash
-python3 testclient/client.py pair --method http \
-  --url http://127.0.0.1:7091 --password 'replace-with-a-long-random-password' \
-  --state client-state.json
+```sh
+serverside pair --transport http \
+  --endpoint https://server.example.com \
+  --pin 'sha256/BASE64_SPKI_PIN'
 ```
 
-For remote clients, use HTTPS / WSS with a certificate verified by the client. Plaintext HTTP passwords are rejected for non-loopback URLs unless a **test-only** override is specified.
+The command displays the **complete copyable URL and the matching QR**. A future client may paste/open the complete URL or scan the matching QR; all use the same one-time `POST /v1/pair` exchange. On success it must securely store the HTTP/WS-scoped `client_id` and `secret`. Reconnects do not need the code or QR again. Cancel outstanding codes with:
 
-### 3. Human Relay (QR / manual PIN, no HTTP or SSH)
-
-```bash
-./serverside serve --human --http-listen off
-# Any time afterwards, print a fresh 2-minute invite:
-./serverside pair
+```sh
+serverside pair --transport http --cancel
 ```
 
-The terminal displays a QR encoding `generative://pair?endpoint=...&ticket=...&fingerprint=...`. If the client cannot scan, manually enter the endpoint, **12-digit one-time PIN**, and TLS fingerprint displayed in the terminal. The QR ticket and PIN expire in 2 minutes and are single-use.
+For HTTP requests, exchange the saved credentials using `POST /v1/auth`; send the returned 15-minute bearer token in the `Authorization` header for `POST /v1/rpc` and `GET /v1/events`. WebSocket uses `GET /v1/ws` plus a single authenticated JSON message, then the same v5 RPC payloads. `GET /v1/capabilities` reports supported operations/transports without exposing private catalog data.
 
-```bash
-python3 testclient/client.py pair --method human --invite 'generative://pair?...' --state client-state.json
-# or
-python3 testclient/client.py pair --method human \
-  --endpoint 192.168.1.5:7090 --fingerprint SHA256_HEX --pin 012345678901 \
-  --state client-state.json
+### Manage the nonsecret catalog and encrypted credentials
+
+```sh
+serverside config init
+serverside config validate
+serverside config export --kind providers --out /tmp/providers.yaml
+serverside config diff --kind providers --file /tmp/providers-edited.yaml
+serverside config import --kind providers --file /tmp/providers-edited.yaml --if-revision 1 --dry-run
+serverside config import --kind providers --file /tmp/providers-edited.yaml --if-revision 1
+EDITOR=vi serverside manage
+serverside provider key set PROVIDER_ID --key-id main --stdin --if-revision 2
+serverside mcp credential set SERVER_ID --method bearer --stdin --if-revision 3
+serverside provider group add --id research --name Research --sort-order 1 --if-revision 4
+serverside provider group edit --id research --name "Research models" --sort-order 2 --if-revision 5
+serverside provider group assign --provider-id PROVIDER_ID --group-id research --if-revision 6
+serverside provider group clear --provider-id PROVIDER_ID --if-revision 7
+serverside provider group delete --id research --if-revision 8
 ```
 
-**Human Relay is an out-of-band handshake, not a hosted relay service.** It never opens SSH or HTTP endpoints; only the direct TLS/TCP data port is required.
+Catalog `--if-revision` is optimistic concurrency control: update the revision shown by `config validate`/catalog output before applying changes. These commands reject credentials in YAML; enter sensitive values only through explicitly supported encrypted-store `--stdin` commands. The TUI uses your editor on a private temporary file and confirms before publishing validated changes.
+
+All v5 chats can be inspected and edited from durable server JSON without persisting mobile-supplied runtime secrets. Use `serverside chat validate-all --client-id OWNER_ID` to check the chat directory for malformed snapshots and tombstones without writing files. After directly editing a valid stored snapshot, `serverside chat reload --id CHAT_ID --client-id OWNER_ID --if-revision REVISION` validates it, saves the exact pre-reload envelope under the private `.backups/chats/` directory, and publishes a new revision; use `--dry-run` to check first. Backups contain plaintext chat data and preserve the hand edit, not an earlier known-good version. Active sessions must close and reopen to adopt an external edit. Server CLI mutations take the persistent chat job lease before committing. Direct file editors do not take that lock, so stop concurrent writers while hand-editing to avoid a race with the final atomic replacement. Use `serverside chat list --client-id OWNER_ID` to find the current chat revision, then:
+
+```sh
+EDITOR=vi serverside chat edit --client-id OWNER_ID --id CHAT_ID --if-revision REVISION --dry-run
+EDITOR=vi serverside chat edit --client-id OWNER_ID --id CHAT_ID --if-revision REVISION --yes
+```
+
+`chat edit` validates the full Conversation, rejects unsafe editor files and saves only if the owner and expected revision still match. It never edits transient provider/MCP runtime configuration. A dry run validates but does not save; `--yes` is required to publish a changed chat. Other clients or active sessions must explicitly refresh their snapshots; this command does not push changes into an already running generation.
+
+### Legacy v4 interoperability (migration only)
+
+If an unpaired **old v4 client** absolutely requires password/QR/PIN enrollment, start the server explicitly with `--allow-legacy-pairing` (and optional `--password` or `--human`). This overrides the new TCP-only-SSH pairing requirement **temporarily** and must not be used in normal v5 deployment. Already-paired v4 data sessions need no migration flag to reconnect. Old `serverside handshake --stdio`, Human Relay and `/v1/handshake` are migration paths only.
 
 ## Test session handoff and offline execution
 
@@ -149,7 +133,7 @@ python3 testclient/client.py demo --state client-state.json \
   --session my-chat-1 --text 'Generated while the client was offline' --delay-ms 350
 ```
 
-This test transfers a RAM-only chat turn, starts the test `echo` job, **disconnects immediately**, lets it complete on the server, reconnects, replays events, then ACKs them and confirms that they are removed from RAM.
+This **legacy v4 demo** transfers a RAM-only v4 handoff, starts the test `echo` job, **disconnects immediately**, lets it complete on the server, reconnects, replays events, then ACKs them and confirms that they are removed from RAM.
 
 The test client requires **Python 3.10+ standard library only**. To run the full end-to-end suite:
 
@@ -269,7 +253,7 @@ On Linux/macOS, terminals use a real PTY and closing terminates their process gr
 
 ## Shared configuration sync for multiple personal devices
 
-This server is designed for **a single owner using several paired clients**. Every paired client can read and update the same durable instructions, skills and non-secret provider metadata. The server owns the shared configuration's monotonic revision; client devices may cache a local copy, but must never blindly replace a newer server revision with old local data.
+The **legacy v4 shared configuration API below** is for a single owner using several paired clients. V5 instead exposes `config.get/save` and permanently stored chat JSON. Every paired client can read and update the same durable instructions, skills and non-secret provider metadata. The server owns the shared configuration's monotonic revision; client devices may cache a local copy, but must never blindly replace a newer server revision with old local data.
 
 A compatible client exchanges `auth → paired(shared_revision,context_digest) → context_get | context_sync | context_update → session traffic`. The entire configuration travels over TLS with certificate pinning. On every reconnect, unchanged data costs only a digest confirmation.
 
@@ -348,10 +332,10 @@ Each payload is prefixed by a **4-byte unsigned big-endian byte length**. Creden
 ## Limitations / next steps
 
 - The API/MCP SDK adapters support text generation and explicit MCP calls. Built-in terminal tools are directly callable by an authenticated client, but **automatic model tool-use loops** are not yet wired into the SDKs.
-- TCP hole punching and address discovery remain separate work. Neither HTTP, SSH nor QR signaling alone removes the requirement for a reachable data endpoint.
-- No persistent event recovery after server restart. Android must resend active **chat execution state**; shared instructions, skills and provider catalogs survive. Cross-device chat-session replay is separate from shared configuration and is not yet implemented.
-- Current in-memory limits are 128 sessions, 2 MiB state per session and 2,048 retained events per session; overflow yields `sync_gap`.
-- A real Android client should persist reconnect secrets in Android Keystore-backed storage, and release Temporary Chats without handing them off.
+- TCP hole punching and address discovery remain separate work. Legacy v4 signaling still requires a reachable TCP data endpoint; v5 can also use the HTTP, WebSocket or Linux SSH stdio data paths.
+- **Legacy v4** RAM event buffers do not survive restart. **V5 chat history remains stored in JSON** and can be reopened by session ID; only mobile-supplied provider/MCP runtime must be re-supplied. V5 live event sequences remain bounded RAM.
+- **Legacy v4** in-memory limits include 128 sessions, 2 MiB state and 2,048 retained events (`sync_gap`). V5 also bounds RAM events (`event_gap`) and currently has a roughly 3 MiB full-conversation limit within a 4 MiB transport frame; larger chat chunking remains to be implemented.
+- A future Android client should securely store paired identity, but its local temporary/sync setting must never change the server's unconditional v5 chat persistence; Android integration is not in scope.
 - Credential revocation should be enforced across already-active connections as this project evolves.
 - SDK/network errors are intentionally redacted to a generic `remote_execution_failed` event to avoid leaking API credentials or sensitive response metadata. More detailed safe error classes are future work.
 - SDK dependencies may increase binary size; CI builds standalone binaries without requiring a Go installation on the deployment server.

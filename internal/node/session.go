@@ -309,18 +309,15 @@ func (s *Session) StartMCP(requestID, serverID, toolName string, args json.RawMe
 		var runErr error
 		defer func() { s.FinishJob(requestID, runErr) }()
 		var result json.RawMessage
+		event := "mcp_result"
 		if list {
+			event = "mcp_tools"
 			result, runErr = execution.ListTools(ctx, state, serverID)
-		}
-		if !list {
+		} else {
 			result, runErr = execution.CallTool(ctx, state, serverID, toolName, args)
 		}
 		if runErr == nil {
-			if list {
-				s.Publish(requestID, "mcp_tools", string(result))
-			} else {
-				s.Publish(requestID, "mcp_result", string(result))
-			}
+			s.Publish(requestID, event, string(result))
 		}
 	}()
 	return nil

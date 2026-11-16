@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -19,9 +20,13 @@ const maxMCPOutputBytes = 256 * 1024
 type authTransport struct {
 	headers map[string]string
 	base    http.RoundTripper
+	origin  *url.URL
 }
 
 func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.origin != nil && (!strings.EqualFold(req.URL.Scheme, t.origin.Scheme) || !strings.EqualFold(req.URL.Host, t.origin.Host)) {
+		return nil, errors.New("cross-origin MCP endpoint rejected")
+	}
 	r := req.Clone(req.Context())
 	for k, v := range t.headers {
 		if strings.EqualFold(k, "Host") || strings.EqualFold(k, "Content-Length") {
@@ -39,6 +44,9 @@ func (s State) enabledMCP(id string) (MCPServer, error) {
 		if cfg.ID == id {
 			if cfg.ID == "" || len(cfg.ID) > 128 {
 				return MCPServer{}, errors.New("invalid MCP identifier")
+			}
+			if cfg.Protocol != "" && cfg.Protocol != "streamable_http" && cfg.Protocol != "sse" {
+				return MCPServer{}, errors.New("unsupported MCP protocol")
 			}
 			if cfg.URL == "" {
 				return MCPServer{}, errors.New("MCP endpoint missing")
@@ -60,16 +68,26 @@ func (s State) enabledMCP(id string) (MCPServer, error) {
 	return MCPServer{}, errors.New("MCP server is not enabled in the session")
 }
 
-func openMCPSession(ctx context.Context, cfg MCPServer) (*mcp.ClientSession, error) {
+func openMCPSession(ctx context.Context, cfg MCPServer, baseClient *http.Client) (*mcp.ClientSession, error) {
+	origin, err := url.Parse(cfg.URL)
+	if err != nil {
+		return nil, errors.New("invalid MCP endpoint")
+	}
+	baseTransport := http.DefaultTransport
+	if baseClient != nil && baseClient.Transport != nil {
+		baseTransport = baseClient.Transport
+	}
 	cli := &http.Client{
 		Timeout:       45 * time.Second,
-		Transport:     &authTransport{headers: cfg.Headers, base: http.DefaultTransport},
+		Transport:     &authTransport{headers: cfg.Headers, base: baseTransport, origin: origin},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "serverside", Version: "0.1.0"}, nil)
-	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint: cfg.URL, HTTPClient: cli, MaxRetries: -1, DisableStandaloneSSE: true,
-	}, nil)
+	var transport mcp.Transport = &mcp.StreamableClientTransport{Endpoint: cfg.URL, HTTPClient: cli, MaxRetries: -1, DisableStandaloneSSE: true}
+	if cfg.Protocol == "sse" {
+		transport = &mcp.SSEClientTransport{Endpoint: cfg.URL, HTTPClient: cli, MaxEventSize: maxMCPOutputBytes}
+	}
+	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		return nil, fmt.Errorf("MCP connect failed: %w", err)
 	}
@@ -83,7 +101,7 @@ func ListTools(ctx context.Context, state State, serverID string) (json.RawMessa
 	if err != nil {
 		return nil, err
 	}
-	session, err := openMCPSession(ctx, cfg)
+	session, err := openMCPSession(ctx, cfg, state.HTTPClient)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +157,7 @@ func CallTool(ctx context.Context, state State, serverID, toolName string, args 
 			return nil, errors.New("MCP tool arguments must be an object")
 		}
 	}
-	session, err := openMCPSession(ctx, cfg)
+	session, err := openMCPSession(ctx, cfg, state.HTTPClient)
 	if err != nil {
 		return nil, err
 	}
