@@ -8,6 +8,8 @@ import (
 	"errors"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,11 +41,15 @@ const maxRuntimeBytes = 2 << 20
 
 // Leave room for the JSON RPC/event envelope inside a 4 MiB transport frame.
 const maxConversationBytes = 3 << 20
+const WholeSnapshotLimit = maxConversationBytes
+const maxChunkedConversationBytes = 8 << 20
 
 type View struct {
 	SessionID    string          `json:"session_id"`
 	Conversation json.RawMessage `json:"conversation"`
 	Revision     uint64          `json:"revision"`
+	// The cursor is scoped to this live session, never to its durable revision.
+	EventSeq uint64 `json:"event_seq"`
 }
 
 type session struct {
@@ -67,8 +73,19 @@ type session struct {
 	discoverySequence uint64
 }
 
+type listSnapshot struct {
+	owner   string
+	items   []ListItem
+	bytes   int
+	expires time.Time
+}
+
 type Manager struct {
+	listMu             sync.Mutex
+	listSnapshots      map[string]listSnapshot
 	mu                 sync.Mutex
+	transferMu         sync.Mutex
+	uploads            map[string]*chunkUpload
 	sessions           map[string]*session
 	store              *chatstore.Store
 	allowLocalAPI      bool
@@ -85,7 +102,7 @@ func New(store *chatstore.Store) *Manager {
 
 func clone(raw json.RawMessage) json.RawMessage { return append(json.RawMessage(nil), raw...) }
 func view(id string, s *session) View {
-	return View{SessionID: id, Conversation: clone(s.conversation), Revision: s.revision}
+	return View{SessionID: id, Conversation: clone(s.conversation), Revision: s.revision, EventSeq: s.seq}
 }
 
 func initialConversation(id string) json.RawMessage {
@@ -129,6 +146,9 @@ func (m *Manager) Open(owner, id string, conversation, runtime json.RawMessage) 
 			return View{}, err
 		}
 		if len(runtime) > 0 {
+			if jsonContainsSecret(s.conversation, runtimeSecrets(runtime)) {
+				return View{}, ErrSecretLeak
+			}
 			if s.running || len(s.discoveries) > 0 {
 				return View{}, ErrBusy
 			}
@@ -156,6 +176,9 @@ func (m *Manager) Open(owner, id string, conversation, runtime json.RawMessage) 
 	}
 	if err != nil {
 		return View{}, err
+	}
+	if len(runtime) > 0 && jsonContainsSecret(snap.Conversation, runtimeSecrets(runtime)) {
+		return View{}, ErrSecretLeak
 	}
 	snap, err = m.recoverInterrupted(owner, id, snap)
 	if err != nil {
@@ -304,7 +327,7 @@ func (m *Manager) Configure(owner, id string, runtime json.RawMessage) error {
 		return ErrBusy
 	}
 	secrets := runtimeSecrets(runtime)
-	if hasSecret(owner, secrets) || hasSecret(id, secrets) {
+	if hasSecret(owner, secrets) || hasSecret(id, secrets) || jsonContainsSecret(s.conversation, secrets) {
 		return ErrSecretLeak
 	}
 	s.runtime = clone(runtime)
@@ -315,6 +338,10 @@ func (m *Manager) Configure(owner, id string, runtime json.RawMessage) error {
 // Save is an explicit client-side edit of the durable server conversation.
 // The revision/CAS boundary prevents lost updates and duplicated save requests.
 func (m *Manager) Save(owner, id, requestID string, expected uint64, conversation json.RawMessage) (View, error) {
+	return m.saveBounded(owner, id, requestID, expected, conversation, maxConversationBytes)
+}
+
+func (m *Manager) saveBounded(owner, id, requestID string, expected uint64, conversation json.RawMessage, limit int) (View, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s := m.sessions[id]
@@ -324,7 +351,7 @@ func (m *Manager) Save(owner, id, requestID string, expected uint64, conversatio
 	if s.running {
 		return View{}, ErrBusy
 	}
-	if len(conversation) > maxConversationBytes {
+	if len(conversation) > limit {
 		return View{}, ErrLimit
 	}
 	if chatstore.Validate(id, conversation) != nil {
@@ -387,11 +414,53 @@ func validRuntime(raw json.RawMessage) bool {
 }
 
 type ListItem struct {
-	DeletedAt int64  `json:"deleted_at,omitempty"`
-	ID        string `json:"id"`
-	Title     string `json:"title,omitempty"`
-	UpdatedAt int64  `json:"updated_at,omitempty"`
-	Revision  uint64 `json:"revision"`
+	DeletedAt       int64   `json:"deleted_at,omitempty"`
+	ID              string  `json:"id"`
+	Title           string  `json:"title,omitempty"`
+	CreatedAt       int64   `json:"created_at,omitempty"`
+	UpdatedAt       int64   `json:"updated_at,omitempty"`
+	TokenCount      *int    `json:"token_count,omitempty"`
+	ProviderID      string  `json:"provider_id,omitempty"`
+	ModelID         string  `json:"model_id,omitempty"`
+	ProfileID       *string `json:"profile_id,omitempty"`
+	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
+	HasMessages     bool    `json:"has_messages"`
+	HasSummary      bool    `json:"has_summary"`
+	Revision        uint64  `json:"revision"`
+}
+
+// Include fixed object/pointer overhead in the retained metadata budget.
+func listItemSize(item ListItem) int {
+	size := 256 + len(item.ID) + len(item.Title) + len(item.ProviderID) + len(item.ModelID)
+	if item.ProfileID != nil {
+		size += len(*item.ProfileID)
+	}
+	if item.ReasoningEffort != nil {
+		size += len(*item.ReasoningEffort)
+	}
+	return size
+}
+
+// Keep metadata replies comfortably below the transport frame limit even when
+// a title contains escaped control characters. Never silently truncate fields.
+func listPageEnd(items []ListItem, offset, limit int) (int, error) {
+	size, end := 0, offset
+	for end < len(items) && end-offset < limit {
+		encoded, err := json.Marshal(items[end])
+		if err != nil {
+			return 0, err
+		}
+		needed := len(encoded) + 1
+		if needed > 2<<20 {
+			return 0, ErrLimit
+		}
+		if size+needed > 2<<20 {
+			break
+		}
+		size += needed
+		end++
+	}
+	return end, nil
 }
 
 // List includes the owner's persisted conversations, even after process restart.
@@ -399,38 +468,159 @@ func (m *Manager) List(owner string, offset, limit int) ([]ListItem, int, error)
 	if offset < 0 || limit < 1 || limit > 100 {
 		return nil, 0, ErrInvalid
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	snaps, tombs, err := m.store.List(owner)
+	items, err := m.listAll(owner)
 	if err != nil {
 		return nil, 0, err
 	}
-	items := make([]ListItem, 0, len(snaps)+len(tombs))
-	for _, snap := range snaps {
-		var c struct {
-			ID        string `json:"id"`
-			Title     string `json:"title"`
-			UpdatedAt int64  `json:"updated_at"`
-		}
-		if json.Unmarshal(snap.Conversation, &c) != nil {
-			return nil, 0, ErrInvalid
-		}
-		items = append(items, ListItem{ID: c.ID, Title: c.Title, UpdatedAt: c.UpdatedAt, Revision: snap.Revision})
-	}
-	for _, t := range tombs {
-		items = append(items, ListItem{ID: t.ID, Revision: t.Revision, DeletedAt: t.DeletedAt})
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	if offset > len(items) {
 		offset = len(items)
 	}
-	end := offset + limit
-	if end > len(items) {
-		end = len(items)
+	end, err := listPageEnd(items, offset, limit)
+	if err != nil {
+		return nil, 0, err
 	}
 	next := 0
 	if end < len(items) {
 		next = end
+	}
+	return items[offset:end], next, nil
+}
+
+func (m *Manager) listAll(owner string) ([]ListItem, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	items := make([]ListItem, 0)
+	metadataBytes := 0
+	appendItem := func(item ListItem) error {
+		size := listItemSize(item)
+		if len(items) >= 100000 || size > (16<<20)-metadataBytes {
+			return ErrLimit
+		}
+		metadataBytes += size
+		items = append(items, item)
+		return nil
+	}
+	err := m.store.Visit(owner, func(snap chatstore.Snapshot) error {
+		var c struct {
+			ID              string            `json:"id"`
+			Title           string            `json:"title"`
+			CreatedAt       int64             `json:"created_at"`
+			UpdatedAt       int64             `json:"updated_at"`
+			TokenCount      *int              `json:"token_count"`
+			ProviderID      string            `json:"provider_id"`
+			ModelID         string            `json:"model_id"`
+			ProfileID       *string           `json:"profile_id"`
+			ReasoningEffort *string           `json:"reasoning_effort"`
+			Messages        []json.RawMessage `json:"messages"`
+			Summary         json.RawMessage   `json:"summary"`
+		}
+		if json.Unmarshal(snap.Conversation, &c) != nil {
+			return ErrInvalid
+		}
+		return appendItem(ListItem{ID: c.ID, Title: c.Title, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
+			TokenCount: c.TokenCount, ProviderID: c.ProviderID, ModelID: c.ModelID, ProfileID: c.ProfileID,
+			ReasoningEffort: c.ReasoningEffort, HasMessages: len(c.Messages) > 0,
+			HasSummary: len(c.Summary) > 0 && string(c.Summary) != "null", Revision: snap.Revision})
+	}, func(t chatstore.Tombstone) error {
+		return appendItem(ListItem{ID: t.ID, Revision: t.Revision, DeletedAt: t.DeletedAt})
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(items, func(i, j int) bool {
+		ti, tj := items[i].UpdatedAt, items[j].UpdatedAt
+		if items[i].DeletedAt != 0 {
+			ti = items[i].DeletedAt
+		}
+		if items[j].DeletedAt != 0 {
+			tj = items[j].DeletedAt
+		}
+		if ti != tj {
+			return ti > tj
+		}
+		return items[i].ID < items[j].ID
+	})
+	return items, nil
+}
+
+// ListSnapshot provides a stable, bounded-lifetime view. Cursors are opaque to
+// clients and are bound to the authenticated owner. Expiry requires a restart.
+func (m *Manager) ListSnapshot(owner, cursor string, limit int) ([]ListItem, string, error) {
+	if owner == "" || limit < 1 || limit > 100 {
+		return nil, "", ErrInvalid
+	}
+	var items []ListItem
+	var id string
+	offset := 0
+	if cursor == "" {
+		var err error
+		items, err = m.listAll(owner)
+		if err != nil {
+			return nil, "", err
+		}
+		end, err := listPageEnd(items, 0, limit)
+		if err != nil {
+			return nil, "", err
+		}
+		if end == len(items) {
+			return items, "", nil
+		}
+		id, err = randomID()
+		if err != nil {
+			return nil, "", err
+		}
+	} else {
+		parts := strings.Split(cursor, ".")
+		if len(parts) != 2 {
+			return nil, "", ErrInvalid
+		}
+		id = parts[0]
+		var err error
+		offset, err = strconv.Atoi(parts[1])
+		if err != nil || offset < 1 {
+			return nil, "", ErrInvalid
+		}
+	}
+	m.listMu.Lock()
+	defer m.listMu.Unlock()
+	now := time.Now()
+	if m.listSnapshots == nil {
+		m.listSnapshots = make(map[string]listSnapshot)
+	}
+	for key, snap := range m.listSnapshots {
+		if !now.Before(snap.expires) {
+			delete(m.listSnapshots, key)
+		}
+	}
+	if cursor == "" {
+		total := len(items)
+		bytes := 0
+		for _, item := range items {
+			bytes += listItemSize(item)
+		}
+		totalBytes := bytes
+		for _, snap := range m.listSnapshots {
+			total += len(snap.items)
+			totalBytes += snap.bytes
+		}
+		if len(m.listSnapshots) >= 32 || total > 100000 || totalBytes > 32<<20 {
+			return nil, "", ErrLimit
+		}
+		m.listSnapshots[id] = listSnapshot{owner: owner, items: items, bytes: bytes, expires: now.Add(5 * time.Minute)}
+	} else {
+		snap, ok := m.listSnapshots[id]
+		if !ok || snap.owner != owner || offset >= len(snap.items) {
+			return nil, "", ErrInvalid
+		}
+		items = snap.items
+	}
+	end, err := listPageEnd(items, offset, limit)
+	if err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if end < len(items) {
+		next = id + "." + strconv.Itoa(end)
 	}
 	return items[offset:end], next, nil
 }

@@ -195,7 +195,7 @@ func rpcHTTPError(w http.ResponseWriter, status int, code, message string) {
 	jsonReply(w, status, rpc.Reply{ID: "", Error: &rpc.Error{Code: code, Message: message}})
 }
 func (n *Node) capabilities() map[string]any {
-	operations := []string{"capabilities.get", "tool.list", "tool.call", "config.get", "config.save", "session.open", "session.configure", "session.get", "session.save", "session.run", "session.cancel", "session.list", "session.delete", "session.events", "session.close"}
+	operations := []string{"capabilities.get", "provider.catalog", "tool.list", "tool.call", "config.get", "config.save", "session.open", "session.open_chunked", "session.read_chunk", "session.upload.begin", "session.upload.chunk", "session.upload.commit", "session.upload.abort", "session.configure", "session.get", "session.save", "session.run", "session.cancel", "session.list", "session.delete", "session.events", "session.close"}
 	if n.Terminals != nil {
 		operations = append(operations, "terminal.create", "terminal.execute", "terminal.read", "terminal.close", "terminal.list")
 	}
@@ -206,7 +206,38 @@ func (n *Node) capabilities() map[string]any {
 	if info, err := os.Lstat(n.Config.DataSocket); DataSocketSupported() && err == nil && info.Mode()&os.ModeSocket != 0 {
 		transports = append(transports, "ssh_stdio")
 	}
-	return map[string]any{"protocol": 5, "transports": transports, "operations": operations, "native_terminal": n.Terminals != nil, "native_agent": n.Agents != nil}
+	return map[string]any{"protocol": 5, "transports": transports, "operations": operations, "native_terminal": n.Terminals != nil, "native_agent": n.Agents != nil,
+		"chat_features": map[string]any{
+			"version":                  1,
+			"provider_catalog":         "provider.catalog",
+			"list_snapshot_pagination": true,
+			"chunked_transfer":         map[string]any{"version": 1, "max_conversation_bytes": 8 << 20, "max_chunk_bytes": 256 << 10, "upload_expiry_seconds": 600, "restart_resumable": false},
+			"model_limits":             "unknown",
+			"runtime_sources":          []string{"stored", "mobile_ephemeral"},
+			"provider_adapters":        []string{"openai", "openai_responses", "anthropic", "google"},
+			"text_generation":          true, "streaming": true, "conversation_summary": true,
+			"attachments": false, "multimodal_input": false, "generation_tool_loop": false,
+			"reasoning_history": false, "selected_instructions": false, "runtime_instruction_handoff": true,
+			"conversation_max_bytes": 3 << 20, "workspace_scope": "paired_client",
+			"negotiation": map[string]any{
+				"version": 1, "catalog_operation": "provider.catalog", "catalog_requires_authentication": true,
+				"modalities": map[string]any{"input": []string{"text"}, "output": []string{"text"}, "attachment_upload": false},
+				"history":    map[string]any{"summary": true, "reasoning": false, "tool_activity": false, "selected_instructions": "explicit_runtime_text"},
+				"generation": map[string]any{"streaming": true, "cancellation": true, "tool_loop": false, "max_history_messages": 256, "max_message_bytes": 512 << 10},
+				"parameters": map[string]any{
+					"max_tokens":  map[string]any{"min": 0, "max": 131072, "provider_limit": "unknown"},
+					"temperature": map[string]any{"min": 0, "max": 2}, "top_p": map[string]any{"min": 0, "max": 1}, "top_k": map[string]any{"min": 1, "max": 1000},
+				},
+				"adapters": map[string]any{
+					"openai":           map[string]any{"parameters": []string{"max_tokens", "temperature", "top_p"}},
+					"openai_responses": map[string]any{"parameters": []string{"max_tokens", "temperature", "top_p"}},
+					"anthropic":        map[string]any{"parameters": []string{"max_tokens"}},
+					"google":           map[string]any{"parameters": []string{"max_tokens", "temperature", "top_p", "top_k"}},
+				},
+				"stored_runtime": map[string]any{"requires_provider_and_model": true, "explicit_key_selection_when_configured": true, "credential_values_returned": false},
+			},
+		},
+	}
 }
 
 // readRPCBody applies the same size limit and error mapping to HTTP RPC inputs.
@@ -226,6 +257,33 @@ func readRPCBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, b
 
 func (n *Node) registerV5(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/pair", n.handleHTTPPair)
+	// A paired HTTP client may revoke only its own credential, never another client.
+	// A successful response invalidates all of this identity's bearer tokens.
+	mux.HandleFunc("POST /v1/revoke", func(w http.ResponseWriter, r *http.Request) {
+		if !secureDataRequest(r) {
+			rpcHTTPError(w, 403, "forbidden", "TLS required")
+			return
+		}
+		owner := n.bearer(r)
+		if owner == "" {
+			rpcHTTPError(w, 401, "unauthorized", "Authentication required")
+			return
+		}
+		// Do not accept a caller-specified target identity or any other payload.
+		body, ok := readRPCBody(w, r, 4096)
+		if !ok {
+			return
+		}
+		if len(body) != 0 {
+			rpcHTTPError(w, 400, "invalid_request", "Revocation takes no body")
+			return
+		}
+		if err := n.revokePair(owner); err != nil {
+			rpcHTTPError(w, 503, "internal_error", "Could not revoke identity")
+			return
+		}
+		jsonReply(w, 200, map[string]any{"revoked": true})
+	})
 	mux.HandleFunc("GET /v1/capabilities", func(w http.ResponseWriter, r *http.Request) {
 		if !secureDataRequest(r) {
 			rpcHTTPError(w, 403, "forbidden", "TLS required")

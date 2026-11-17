@@ -319,3 +319,36 @@ func TestBackupReadRejectsOversizedOrSymlinkedFiles(t *testing.T) {
 		t.Fatalf("symlink accepted: %v", err)
 	}
 }
+
+func TestVisitStreamsOwnerSnapshotsAndPropagatesCallbackErrors(t *testing.T) {
+	s := New(filepath.Join(t.TempDir(), "data"))
+	for _, id := range []string{"a", "b", "c"} {
+		raw := json.RawMessage(fmt.Sprintf(`{"id":%q,"title":"","created_at":1,"updated_at":1,"messages":[]}`, id))
+		if _, err := s.Save(id, "owner", "op", 0, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	foreign := json.RawMessage(`{"id":"other","title":"","created_at":1,"updated_at":1,"messages":[]}`)
+	if _, err := s.Save("other", "other-owner", "op", 0, foreign); err != nil {
+		t.Fatal(err)
+	}
+	stop := errors.New("stop")
+	count := 0
+	err := s.Visit("owner", func(snap Snapshot) error {
+		count++
+		if snap.OwnerID != "owner" {
+			t.Fatal("foreign snapshot")
+		}
+		if count == 2 {
+			return stop
+		}
+		return nil
+	}, func(Tombstone) error { return nil })
+	if !errors.Is(err, stop) || count != 2 {
+		t.Fatalf("count=%d error=%v", count, err)
+	}
+	snaps, _, err := s.List("owner")
+	if err != nil || len(snaps) != 3 {
+		t.Fatalf("legacy list: %d %v", len(snaps), err)
+	}
+}

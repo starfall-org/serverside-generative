@@ -218,6 +218,9 @@ func New(c Config) (*Node, error) {
 	})
 	n.rpc = rpc.New(sessionsV5)
 	n.rpc.SetCatalog(catalog.New(c.DataDir))
+	n.rpc.SetProviderCatalog(func() (any, error) {
+		return storedruntime.ReadCatalogValidated(c.DataDir, chatsession.ValidateStoredRuntime)
+	})
 	n.rpc.SetNative(n.nativeRPC)
 	n.rpc.SetCapabilities(func() any { return n.capabilities() })
 	n.nativeReceipts = make(map[string]*nativeReceipt)
@@ -415,6 +418,12 @@ func (n *Node) revokePair(id string) error {
 		return err
 	}
 	delete(n.activeConnection, id)
+	// Deny future use and promptly discard all HTTP bearer secrets for this identity.
+	for digest, token := range n.tokens {
+		if token.owner == id {
+			delete(n.tokens, digest)
+		}
+	}
 	for key := range n.nativeReceipts {
 		if strings.HasPrefix(key, id+"\x00") {
 			delete(n.nativeReceipts, key)

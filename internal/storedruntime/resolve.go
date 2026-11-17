@@ -18,10 +18,11 @@ var ErrNotFound = errors.New("stored provider or model not found")
 
 func Resolve(dir string, raw json.RawMessage) (json.RawMessage, error) {
 	var request struct {
-		Source     string `json:"source"`
-		ProviderID string `json:"provider_id"`
-		ModelID    string `json:"model_id"`
-		KeyID      string `json:"key_id"`
+		Source       string            `json:"source"`
+		ProviderID   string            `json:"provider_id"`
+		ModelID      string            `json:"model_id"`
+		KeyID        string            `json:"key_id"`
+		Instructions map[string]string `json:"instructions"`
 	}
 	if json.Unmarshal(raw, &request) != nil || request.Source != "stored" || request.ProviderID == "" || request.ModelID == "" {
 		return nil, ErrUnsupported
@@ -157,7 +158,7 @@ func Resolve(dir string, raw json.RawMessage) (json.RawMessage, error) {
 	if m, ok := model.ModelConfigs[request.ModelID]; ok {
 		provider["modelConfig"] = m
 	}
-	encoded, err := json.Marshal(map[string]any{"source": "mobile_ephemeral", "provider": provider})
+	encoded, err := json.Marshal(map[string]any{"source": "mobile_ephemeral", "provider": provider, "instructions": request.Instructions})
 	if err != nil {
 		return nil, ErrUnsupported
 	}

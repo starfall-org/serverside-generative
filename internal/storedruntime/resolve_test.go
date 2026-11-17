@@ -28,6 +28,18 @@ func TestStoredResolutionReadOnlyAndNoFallback(t *testing.T) {
 	if err = s.Close(); err != nil {
 		t.Fatal(err)
 	}
+	metadata, err := ReadCatalog(dir)
+	if err != nil || len(metadata.Providers) != 1 || len(metadata.Providers[0].Models) != 1 || metadata.Providers[0].Models[0].Availability != "available" {
+		t.Fatalf("catalog: %+v %v", metadata, err)
+	}
+	validated, err := ReadCatalogValidated(dir, func(json.RawMessage) error { return ErrUnsupported })
+	if err != nil || validated.Providers[0].Models[0].Availability != "unsupported" {
+		t.Fatalf("unsupported runtime: %+v %v", validated, err)
+	}
+	encoded, _ := json.Marshal(metadata)
+	if bytes.Contains(encoded, []byte("stored-secret-sentinel")) || bytes.Contains(encoded, []byte("credential_ref")) {
+		t.Fatal("catalog leaked credentials")
+	}
 	before, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -43,8 +55,8 @@ func TestStoredResolutionReadOnlyAndNoFallback(t *testing.T) {
 		}
 		snapshots[entry.Name()] = data
 	}
-	out, err := Resolve(dir, json.RawMessage(`{"source":"stored","provider_id":"p","model_id":"org/model"}`))
-	if err != nil || !bytes.Contains(out, []byte("stored-secret-sentinel")) {
+	out, err := Resolve(dir, json.RawMessage(`{"source":"stored","provider_id":"p","model_id":"org/model","instructions":{"instruction":"Be concise"}}`))
+	if err != nil || !bytes.Contains(out, []byte("stored-secret-sentinel")) || !bytes.Contains(out, []byte("Be concise")) {
 		t.Fatalf("resolution failed: %v", err)
 	}
 	after, err := os.ReadDir(dir)
@@ -134,5 +146,54 @@ func TestStoredProviderQueryAndHeaderAuthentication(t *testing.T) {
 				t.Fatal("stored auth was not resolved")
 			}
 		})
+	}
+}
+
+func TestCatalogUnavailableCredential(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	docs, err := catalog.Empty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs["providers.yaml"] = "schema_version: 1\nrevision: 1\ngroups: []\nproviders:\n  - id: p\n    name: P\n    type: openai\n    auth: {method: bearer_token, credential_ref: provider/p/main}\n"
+	docs["models.yaml"] = "schema_version: 1\nrevision: 1\nproviders:\n  p: {modelIds: [m], modelConfigs: {}, catalog: []}\n"
+	if _, err = catalog.New(dir).Save(0, docs); err != nil {
+		t.Fatal(err)
+	}
+	c, err := ReadCatalog(dir)
+	if err != nil || c.Providers[0].Models[0].Availability != "credential_unavailable" {
+		t.Fatalf("catalog: %+v %v", c, err)
+	}
+}
+
+func TestCatalogReportsExplicitKeyCredentialStatus(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	docs, err := catalog.Empty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs["providers.yaml"] = "schema_version: 1\nrevision: 1\ngroups: []\nproviders:\n  - id: p\n    name: P\n    type: openai\n    auth: {method: bearer_token}\n    config:\n      multipleApiKeys: true\n      apiKeys:\n        - {id: good, label: Good, credential_ref: provider/p/good}\n        - {id: missing, label: Missing, credential_ref: provider/p/missing}\n"
+	docs["models.yaml"] = "schema_version: 1\nrevision: 1\nproviders:\n  p: {modelIds: [m], modelConfigs: {}, catalog: []}\n"
+	if _, err = catalog.New(dir).Save(0, docs); err != nil {
+		t.Fatal(err)
+	}
+	store, err := secrets.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Put("provider", "p", "good", "Good", "api_key", []byte("secret-never-returned")); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	c, err := ReadCatalog(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Providers) != 1 || len(c.Providers[0].Keys) != 2 || c.Providers[0].Keys[0].Availability != "available" || c.Providers[0].Keys[1].Availability != "credential_unavailable" || c.Providers[0].Models[0].Availability != "key_selection_required" {
+		t.Fatalf("keys %+v", c)
+	}
+	raw, _ := json.Marshal(c)
+	if bytes.Contains(raw, []byte("secret-never-returned")) || bytes.Contains(raw, []byte("credential_ref")) {
+		t.Fatal("catalog leaked secret")
 	}
 }

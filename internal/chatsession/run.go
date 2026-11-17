@@ -212,6 +212,11 @@ func (m *Manager) Run(owner, id, requestID, content string) error {
 	if hasSecret(owner, secrets) || hasSecret(id, secrets) || hasSecret(requestID, secrets) || hasSecret(content, secrets) || hasSecret(state.Provider.ID, secrets) || hasSecret(state.Provider.Model, secrets) {
 		return ErrSecretLeak
 	}
+	for _, message := range state.Conversation {
+		if hasSecret(message.Content, secrets) {
+			return ErrSecretLeak
+		}
+	}
 	state.HTTPClient = execution.SafeHTTPClient(m.allowLocalAPI)
 	state.HTTPClient = execution.WithWireAuth(state.HTTPClient, state.WireAuthMethod, state.WireAuthKey, state.WireAuthValue)
 	if err = state.ValidateModel(); err != nil {
@@ -412,6 +417,17 @@ func (m *Manager) Run(owner, id, requestID, content string) error {
 	}()
 	return nil
 }
+
+// ValidateStoredRuntime uses the same adapter/config validation as a text run,
+// without performing network I/O or exposing resolved credentials.
+func ValidateStoredRuntime(raw json.RawMessage) error {
+	state, err := runtimeState(raw, json.RawMessage(`{"messages":[]}`), "probe")
+	if err != nil {
+		return err
+	}
+	return state.ValidateModel()
+}
+
 func runtimeState(raw, conversation json.RawMessage, content string) (execution.State, error) {
 	var v struct {
 		Source   string `json:"source"`
@@ -431,6 +447,7 @@ func runtimeState(raw, conversation json.RawMessage, content string) (execution.
 		MCP          []json.RawMessage `json:"mcp"`
 		CustomTools  []json.RawMessage `json:"customTools"`
 		ToolSettings json.RawMessage   `json:"toolSettings"`
+		Instructions map[string]string `json:"instructions"`
 	}
 	if json.Unmarshal(raw, &v) != nil || v.Source != "mobile_ephemeral" {
 		return execution.State{}, ErrUnsupported
@@ -527,8 +544,17 @@ func runtimeState(raw, conversation json.RawMessage, content string) (execution.
 		apiKey = "unused"
 	}
 	state := execution.State{Provider: execution.Provider{ID: v.Provider.ID, Platform: platform, APIKey: apiKey, Model: v.Provider.ModelID, BaseURL: v.Provider.BaseURL, MaxTokens: maxTokens, Temperature: temperature, TopP: topP, TopK: topK}, WireAuthMethod: method, WireAuthKey: key, WireAuthValue: secret}
-	if len(c.Prompts) > 0 {
-		return execution.State{}, ErrUnsupported
+	if len(c.Prompts) > 32 || len(v.Instructions) > 32 {
+		return execution.State{}, ErrInvalid
+	}
+	seenInstructions := map[string]bool{}
+	for _, id := range c.Prompts {
+		text, ok := v.Instructions[id]
+		if !ok || id == "" || seenInstructions[id] || strings.TrimSpace(text) == "" || len(text) > 16<<10 {
+			return execution.State{}, ErrUnsupported
+		}
+		seenInstructions[id] = true
+		state.Conversation = append(state.Conversation, execution.Message{Role: "system", Content: text})
 	}
 	start := 0
 	if c.Summary != nil {

@@ -659,32 +659,43 @@ func (s *Store) delete(owner, id, opID string, expected uint64, prior json.RawMe
 }
 
 // List returns authoritative snapshots and tombstones owned by this client.
+// List retains the legacy aggregate API for callers that need full snapshots.
 func (s *Store) List(owner string) ([]Snapshot, []Tombstone, error) {
+	snapshots := []Snapshot{}
+	tombs := []Tombstone{}
+	err := s.Visit(owner, func(snap Snapshot) error { snapshots = append(snapshots, snap); return nil }, func(t Tombstone) error { tombs = append(tombs, t); return nil })
+	if err != nil {
+		return nil, nil, err
+	}
+	return snapshots, tombs, nil
+}
+
+// Visit holds the store lock and validates one snapshot at a time; callbacks must
+// not reenter the store or retain complete conversation bodies unnecessarily.
+func (s *Store) Visit(owner string, visitSnapshot func(Snapshot) error, visitTombstone func(Tombstone) error) error {
 	if !validID(owner) {
-		return nil, nil, ErrInvalid
+		return ErrInvalid
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.checkDirs(false); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return []Snapshot{}, []Tombstone{}, nil
+			return nil
 		}
-		return nil, nil, err
+		return err
 	}
 	unlock, lockErr := lockDirectory(s.dir, false)
 	if lockErr != nil {
-		return nil, nil, lockErr
+		return lockErr
 	}
 	defer unlock()
 	entries, err := os.ReadDir(s.dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return []Snapshot{}, []Tombstone{}, nil
+		return nil
 	}
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
-	snapshots := []Snapshot{}
-	tombs := []Tombstone{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || len(entry.Name()) != 69 {
 			continue
@@ -692,46 +703,48 @@ func (s *Store) List(owner string) ([]Snapshot, []Tombstone, error) {
 		path := filepath.Join(s.dir, entry.Name())
 		data, err := readBoundedRegular(path, true)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		var snap Snapshot
 		if json.Unmarshal(data, &snap) != nil {
-			return nil, nil, ErrInvalid
+			return ErrInvalid
 		}
 		var c struct {
 			ID string `json:"id"`
 		}
 		if json.Unmarshal(snap.Conversation, &c) != nil || filename(c.ID) != entry.Name() {
-			return nil, nil, ErrInvalid
+			return ErrInvalid
 		}
 		verified, err := s.load(c.ID)
 		if errors.Is(err, ErrDeleted) {
 			continue
 		}
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		if verified.OwnerID == owner {
-			snapshots = append(snapshots, verified)
+			if err := visitSnapshot(verified); err != nil {
+				return err
+			}
 		}
 	}
 	tombDir := filepath.Join(s.dir, ".tombstones")
 	info, dirErr := os.Lstat(tombDir)
 	if errors.Is(dirErr, os.ErrNotExist) {
-		return snapshots, tombs, nil
+		return nil
 	}
 	if dirErr != nil {
-		return nil, nil, dirErr
+		return dirErr
 	}
 	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
-		return nil, nil, ErrInvalid
+		return ErrInvalid
 	}
 	entries, err = os.ReadDir(tombDir)
 	if errors.Is(err, os.ErrNotExist) {
-		return snapshots, tombs, nil
+		return nil
 	}
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || len(entry.Name()) != 69 {
@@ -740,25 +753,27 @@ func (s *Store) List(owner string) ([]Snapshot, []Tombstone, error) {
 		path := filepath.Join(s.dir, ".tombstones", entry.Name())
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
-			return nil, nil, ErrInvalid
+			return ErrInvalid
 		}
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		var t Tombstone
 		if json.Unmarshal(b, &t) != nil || filename(t.ID) != entry.Name() {
-			return nil, nil, ErrInvalid
+			return ErrInvalid
 		}
 		t, err = s.tombstone(t.ID)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		if t.OwnerID == owner {
-			tombs = append(tombs, t)
+			if err := visitTombstone(t); err != nil {
+				return err
+			}
 		}
 	}
-	return snapshots, tombs, nil
+	return nil
 }
 
 // checkDirs rejects symlinks at both managed directory boundaries. The data

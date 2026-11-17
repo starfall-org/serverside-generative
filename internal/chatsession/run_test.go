@@ -28,6 +28,7 @@ func TestRunTextPersistenceAndDedupe(t *testing.T) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		seen <- body
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
 	}))
@@ -121,11 +122,20 @@ func TestRuntimeUsesSummaryAndRejectsUnsupportedHistory(t *testing.T) {
 }
 
 func TestStoredRuntimePersistsChatButNotTransientCredentials(t *testing.T) {
+	seenInstruction := make(chan bool, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer stored-sentinel" {
 			http.Error(w, "unauthorized", 401)
 			return
 		}
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		err := json.NewDecoder(r.Body).Decode(&body)
+		seenInstruction <- err == nil && len(body.Messages) > 0 && body.Messages[0].Role == "system" && body.Messages[0].Content == "Instruction test"
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
 	}))
@@ -150,7 +160,7 @@ func TestStoredRuntimePersistsChatButNotTransientCredentials(t *testing.T) {
 	m := New(chatstore.New(dir))
 	m.AllowLocalAPI(true)
 	m.SetStoredResolver(func(raw json.RawMessage) (json.RawMessage, error) { return storedruntime.Resolve(dir, raw) })
-	if _, err = m.Open("a", "c", sample, json.RawMessage(`{"source":"stored","provider_id":"p","model_id":"test"}`)); err != nil {
+	if _, err = m.Open("a", "c", json.RawMessage(`{"id":"c","title":"title","created_at":1,"updated_at":2,"messages":[],"selected_prompt_ids":["instruction"]}`), json.RawMessage(`{"source":"stored","provider_id":"p","model_id":"test","instructions":{"instruction":"Instruction test"}}`)); err != nil {
 		t.Fatal(err)
 	}
 	ch, stop, err := m.Subscribe("a", "c")
@@ -186,12 +196,15 @@ func TestStoredRuntimePersistsChatButNotTransientCredentials(t *testing.T) {
 			}
 		}
 	}
+	if !<-seenInstruction {
+		t.Fatal("instruction not sent as system text")
+	}
 	after, err := os.ReadDir(dir)
 	if err != nil || len(after) != len(before)+3 {
 		t.Fatalf("expected private chats, backups and job leases directories: before=%d after=%d err=%v", len(before), len(after), err)
 	}
 	snap, err := chatstore.New(dir).Get("a", "c")
-	if err != nil || !strings.Contains(string(snap.Conversation), "ok") || strings.Contains(string(snap.Conversation), "stored-sentinel") {
+	if err != nil || !strings.Contains(string(snap.Conversation), "ok") || strings.Contains(string(snap.Conversation), "stored-sentinel") || strings.Contains(string(snap.Conversation), "Instruction test") {
 		t.Fatalf("chat persistence or leaked credential: %+v %v", snap, err)
 	}
 }
@@ -575,5 +588,55 @@ func TestExpiredOAuthTokenProducesAuthRequired(t *testing.T) {
 			}
 			t.Fatal("missing auth_required event")
 		})
+	}
+}
+
+func TestSelectedInstructionsRequireExplicitCompleteRuntime(t *testing.T) {
+	runtime := json.RawMessage(`{"source":"mobile_ephemeral","provider":{"type":"openai","modelId":"test","auth":{"method":"none"}},"instructions":{"first":"Be concise","second":"Use English"}}`)
+	conversation := json.RawMessage(`{"messages":[{"role":"user","versions":[{"content":"prior"}]}],"selected_prompt_ids":["second","first"]}`)
+	state, err := runtimeState(runtime, conversation, "new")
+	if err != nil || len(state.Conversation) != 4 || state.Conversation[0].Role != "system" || state.Conversation[0].Content != "Use English" || state.Conversation[1].Content != "Be concise" || state.Conversation[2].Content != "prior" {
+		t.Fatalf("instruction ordering: %+v %v", state.Conversation, err)
+	}
+	missing := json.RawMessage(`{"messages":[],"selected_prompt_ids":["missing"]}`)
+	if _, err = runtimeState(runtime, missing, "new"); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("missing: %v", err)
+	}
+	duplicate := json.RawMessage(`{"messages":[],"selected_prompt_ids":["first","first"]}`)
+	if _, err = runtimeState(runtime, duplicate, "new"); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("duplicate: %v", err)
+	}
+}
+
+func TestCatalogReportsUnsupportedAdapterSettings(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	docs, err := catalog.Empty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs["providers.yaml"] = "schema_version: 1\nrevision: 1\ngroups: []\nproviders:\n  - id: p\n    name: Provider\n    type: openai\n    baseUrl: ''\n    auth: {method: none}\n"
+	docs["models.yaml"] = "schema_version: 1\nrevision: 1\nproviders:\n  p: {modelIds: [m], modelConfigs: {m: {modelType: TEXT_GENERATION, top_k: 3}}, catalog: []}\n"
+	if _, err = catalog.New(dir).Save(0, docs); err != nil {
+		t.Fatal(err)
+	}
+	got, err := storedruntime.ReadCatalogValidated(dir, ValidateStoredRuntime)
+	if err != nil || len(got.Providers) != 1 || len(got.Providers[0].Models) != 1 || got.Providers[0].Models[0].Availability != "unsupported" {
+		t.Fatalf("catalog %+v %v", got, err)
+	}
+}
+
+func TestInstructionCannotForwardRuntimeCredential(t *testing.T) {
+	m := New(chatstore.New(filepath.Join(t.TempDir(), "data")))
+	raw := json.RawMessage(`{"id":"c","title":"","created_at":1,"updated_at":2,"messages":[],"selected_prompt_ids":["i"]}`)
+	runtime := json.RawMessage(`{"source":"mobile_ephemeral","provider":{"type":"openai","modelId":"m","auth":{"method":"bearer_token","value":"private-secret"}},"instructions":{"i":"Never send private-secret"}}`)
+	if _, err := m.Open("owner", "c", raw, runtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Run("owner", "c", "request", "hello"); !errors.Is(err, ErrSecretLeak) {
+		t.Fatalf("credential in instruction: %v", err)
+	}
+	v, err := m.Get("owner", "c")
+	if err != nil || v.Revision != 1 {
+		t.Fatalf("run changed history: %+v %v", v, err)
 	}
 }

@@ -31,16 +31,18 @@ type Reply struct {
 	Error *Error `json:"error,omitempty"`
 }
 type Dispatcher struct {
-	sessions     *chatsession.Manager
-	catalog      *catalog.Store
-	native       func(string, Request) Reply
-	capabilities func() any
+	sessions        *chatsession.Manager
+	catalog         *catalog.Store
+	native          func(string, Request) Reply
+	capabilities    func() any
+	providerCatalog func() (any, error)
 }
 
-func New(s *chatsession.Manager) *Dispatcher                        { return &Dispatcher{sessions: s} }
-func (d *Dispatcher) SetCatalog(c *catalog.Store)                   { d.catalog = c }
-func (d *Dispatcher) SetNative(handler func(string, Request) Reply) { d.native = handler }
-func (d *Dispatcher) SetCapabilities(handler func() any)            { d.capabilities = handler }
+func New(s *chatsession.Manager) *Dispatcher                         { return &Dispatcher{sessions: s} }
+func (d *Dispatcher) SetCatalog(c *catalog.Store)                    { d.catalog = c }
+func (d *Dispatcher) SetNative(handler func(string, Request) Reply)  { d.native = handler }
+func (d *Dispatcher) SetProviderCatalog(handler func() (any, error)) { d.providerCatalog = handler }
+func (d *Dispatcher) SetCapabilities(handler func() any)             { d.capabilities = handler }
 func failure(id, code, message string) Reply {
 	return Reply{ID: id, Error: &Error{Code: code, Message: message}}
 }
@@ -65,6 +67,11 @@ func (d *Dispatcher) Dispatch(owner string, r Request) Reply {
 			return failure(r.ID, "unsupported_feature", "Capabilities unavailable")
 		}
 		result = d.capabilities()
+	case "provider.catalog":
+		if d.providerCatalog == nil {
+			return failure(r.ID, "unsupported_feature", "Catalog unavailable")
+		}
+		result, err = d.providerCatalog()
 	case "tool.list":
 		var in struct {
 			ServerID string `json:"server_id"`
@@ -148,6 +155,7 @@ func (d *Dispatcher) Dispatch(owner string, r Request) Reply {
 		// transmitted or interpreted by this RAM-only runtime.
 		var in struct {
 			After        uint64          `json:"after"`
+			IfRevision   *uint64         `json:"if_revision"`
 			Conversation json.RawMessage `json:"conversation"`
 			Runtime      json.RawMessage `json:"runtime"`
 		}
@@ -157,7 +165,75 @@ func (d *Dispatcher) Dispatch(owner string, r Request) Reply {
 		if string(in.Runtime) == "null" {
 			in.Runtime = nil
 		}
-		result, err = d.sessions.Open(owner, r.SessionID, in.Conversation, in.Runtime)
+		var v chatsession.View
+		v, err = d.sessions.Open(owner, r.SessionID, in.Conversation, in.Runtime)
+		if err == nil && in.IfRevision != nil && *in.IfRevision == v.Revision {
+			result = map[string]any{"session_id": v.SessionID, "revision": v.Revision, "event_seq": v.EventSeq, "unchanged": true}
+		} else if err == nil && len(v.Conversation) > chatsession.WholeSnapshotLimit {
+			err = chatsession.ErrLimit
+		} else {
+			result = v
+		}
+	case "session.open_chunked":
+		result, err = d.sessions.OpenChunked(owner, r.SessionID)
+	case "session.read_chunk":
+		var in struct {
+			Revision uint64 `json:"revision"`
+			Offset   int    `json:"offset"`
+			Limit    int    `json:"limit"`
+		}
+		if !decode(r.Data, &in) {
+			return failure(r.ID, "invalid_request", "Invalid chunk request")
+		}
+		result, err = d.sessions.ReadChunk(owner, r.SessionID, in.Revision, in.Offset, in.Limit)
+	case "session.upload.begin":
+		var in struct {
+			Expected uint64 `json:"expected_revision"`
+			Size     int    `json:"size"`
+			SHA256   string `json:"sha256"`
+			Key      string `json:"idempotency_key"`
+		}
+		if !decode(r.Data, &in) {
+			return failure(r.ID, "invalid_request", "Invalid upload")
+		}
+		var token string
+		token, err = d.sessions.BeginUpload(owner, r.SessionID, in.Key, in.SHA256, in.Expected, in.Size)
+		if err == nil {
+			result = map[string]any{"version": 1, "upload_id": token, "chunk_max_bytes": 256 << 10}
+		}
+	case "session.upload.chunk":
+		var in struct {
+			UploadID string `json:"upload_id"`
+			Offset   int    `json:"offset"`
+			Data     []byte `json:"data"`
+		}
+		if !decode(r.Data, &in) {
+			return failure(r.ID, "invalid_request", "Invalid upload chunk")
+		}
+		var next int
+		next, err = d.sessions.UploadChunk(owner, r.SessionID, in.UploadID, in.Offset, in.Data)
+		if err == nil {
+			result = map[string]any{"next_offset": next}
+		}
+	case "session.upload.commit":
+		var in struct {
+			UploadID string `json:"upload_id"`
+		}
+		if !decode(r.Data, &in) {
+			return failure(r.ID, "invalid_request", "Invalid upload commit")
+		}
+		result, err = d.sessions.CommitUpload(owner, r.SessionID, in.UploadID)
+	case "session.upload.abort":
+		var in struct {
+			UploadID string `json:"upload_id"`
+		}
+		if !decode(r.Data, &in) {
+			return failure(r.ID, "invalid_request", "Invalid upload abort")
+		}
+		err = d.sessions.AbortUpload(owner, r.SessionID, in.UploadID)
+		if err == nil {
+			result = map[string]bool{"aborted": true}
+		}
 	case "session.get":
 		var in struct {
 			IfRevision *uint64 `json:"if_revision"`
@@ -169,7 +245,9 @@ func (d *Dispatcher) Dispatch(owner string, r Request) Reply {
 		v, err = d.sessions.Get(owner, r.SessionID)
 		if err == nil {
 			if in.IfRevision != nil && *in.IfRevision == v.Revision {
-				result = map[string]any{"session_id": r.SessionID, "revision": v.Revision, "unchanged": true}
+				result = map[string]any{"session_id": r.SessionID, "revision": v.Revision, "unchanged": true, "event_seq": v.EventSeq}
+			} else if len(v.Conversation) > chatsession.WholeSnapshotLimit {
+				err = chatsession.ErrLimit
 			} else {
 				result = v
 			}
@@ -233,12 +311,29 @@ func (d *Dispatcher) Dispatch(owner string, r Request) Reply {
 
 	case "session.list":
 		var in struct {
-			Offset int `json:"offset"`
-			Limit  int `json:"limit"`
+			Offset     int    `json:"offset"`
+			Limit      int    `json:"limit"`
+			Pagination string `json:"pagination"`
+			Cursor     string `json:"cursor"`
 		}
 		in.Limit = 50
 		if len(r.Data) > 0 && !decode(r.Data, &in) {
 			return failure(r.ID, "invalid_request", "Invalid list data")
+		}
+		if in.Pagination == "snapshot" {
+			if in.Offset != 0 {
+				return failure(r.ID, "invalid_request", "Offset is incompatible with snapshot pagination")
+			}
+			var items []chatsession.ListItem
+			var next string
+			items, next, err = d.sessions.ListSnapshot(owner, in.Cursor, in.Limit)
+			if err == nil {
+				result = map[string]any{"version": 1, "items": items, "next_cursor": next}
+			}
+			break
+		}
+		if in.Pagination != "" || in.Cursor != "" {
+			return failure(r.ID, "invalid_request", "Invalid pagination")
 		}
 		var items []chatsession.ListItem
 		var next int

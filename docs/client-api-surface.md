@@ -1,6 +1,6 @@
 # ServerSide v5 — API offered to future clients
 
-**Current server contract (2026-11-15): every conversation is stored durably on the Go server, independent of any mobile sync preference.** The Android app is **not** implemented or modified by this work. See [persistence plan](../plans/05-chat-sync.md), [transport plan](../plans/07-transport.md) and [future interface concepts](future-generative-interface.md).
+**Current server contract:** every conversation is stored durably on the Go server, independent of any mobile sync preference. The Android Server Connection implementation is in progress; consult its tracker for verified support.
 
 ## 1. Protocol architecture
 
@@ -78,7 +78,7 @@ Open/create a conversation:
 Successful response (actual field shape):
 
 ```json
-{"id":"open-1","ok":true,"data":{"session_id":"chat-1","revision":1,"conversation":{"id":"chat-1","title":"Example","created_at":1,"updated_at":2,"messages":[]}}}
+{"id":"open-1","ok":true,"data":{"session_id":"chat-1","revision":1,"event_seq":0,"conversation":{"id":"chat-1","title":"Example","created_at":1,"updated_at":2,"messages":[]}}}
 ```
 
 Start a job:
@@ -99,12 +99,38 @@ The server emits `delta` events during text streaming and a `conversation` event
 {"session_id":"chat-1","seq":3,"request_id":"run-1","kind":"conversation","data":{"revision":2,"conversation":{"id":"chat-1","title":"Example","created_at":1,"updated_at":3,"messages":[]}}}
 ```
 
+To avoid transferring unchanged chat history, a client with a complete local
+snapshot may call `session.open` (or `session.get`) with
+`{"if_revision": <cached_revision>}`. The server still validates the authenticated
+owner, opens the live session, and replies with
+`{"session_id":"...","revision":N,"event_seq":M,"unchanged":true}` **only** when
+the server's durable revision matches. Otherwise it returns the authoritative
+full snapshot, or `resource_exhausted` for oversized whole-history replies;
+clients must then use chunked reads. No cached history is uploaded to the server
+by this operation. Clients must never treat `unchanged` as proof of ownership
+without a successful authenticated response.
+
+The `event_seq` on `session.open` and `session.get` is the current live
+session event sequence at the instant the snapshot was captured. Clients must
+subscribe to `/v1/events?after=event_seq` **before or after** sending a new
+`session.run`, as long as no events are lost beyond the retention window. The
+field is also included in `session.open_chunked`; it is an **in-memory cursor**,
+not a durable revision, and resets when the server process/session restarts.
+Clients must obtain a fresh `event_seq` from `session.open` before starting a
+new run rather than reusing a persisted cursor. Existing clients may ignore
+this additive field. No snapshot can replay already-evicted deltas; reconnect
+must reconcile the durable `conversation` and must never replay an uncertain
+`session.run` request automatically.
+
 The event's `conversation.messages` is illustrative here. In reality it contains the newly stored user input and assistant/tool state; a client must not substitute the empty example for an actual response. A later `completed` event signals completion, while `error` reports a failed/interrupted operation. Event sequences are per active session, not persisted across daemon restarts.
 
 | Operation | What it offers |
 | --- | --- |
 | `capabilities.get` | Discover version, operations and transports |
+| `provider.catalog` | Authenticated, typed, read-only server-owned provider/model selection metadata |
 | `session.open` | Create/resume **durable** chat; no `storage`; optional initial `conversation` and transient `runtime` |
+| `session.open_chunked` / `session.read_chunk` | Open and retrieve a revision-bound conversation in bounded chunks |
+| `session.upload.begin` / `session.upload.chunk` / `session.upload.commit` / `session.upload.abort` | Owner-scoped, checksummed CAS upload of a bounded conversation |
 | `session.configure` | Replace transient provider/MCP/runtime settings in RAM |
 | `session.run` / `session.cancel` | Start one request and optionally cancel by `request_id` |
 | `session.get` | Full server conversation + `revision`; accepts `if_revision` and may return `unchanged` |
@@ -116,6 +142,106 @@ The event's `conversation.messages` is illustrative here. In reality it contains
 | `tool.list` / `tool.call` | Discover/execute authorized tools |
 | `config.get` / `config.save` | Server-managed nonsecret YAML configuration |
 | `terminal.*` / `agent.*` | Optional native tools when enabled by server administrator |
+
+`session.list` returns a lightweight projection of conversation metadata, including
+creation and update times, provider, model, profile, reasoning effort, token count,
+and message/summary presence. Items are ordered by descending update time (or
+deletion time for tombstones), then ascending ID. Offset pages are evaluated
+independently: concurrent changes may move items between pages, so clients must
+refresh the list rather than treat a multi-page traversal as a snapshot.
+
+For stable traversal, call `session.list` with `{"pagination":"snapshot","limit":50}`.
+Pass the returned `next_cursor` unchanged with the same pagination mode on subsequent
+calls until it is empty. Rows and tombstones reflect one owner-scoped snapshot;
+updates after its creation appear on a fresh traversal. Cursors can be retried,
+expire after five minutes or server restart, and an expired/invalid cursor returns
+`invalid_request`; restart the traversal. At most 32 snapshots, 100,000 retained rows, and approximately 32 MiB of
+retained projection metadata are held per process; each projection is limited to
+16 MiB and each returned page to 2 MiB. An oversized individual row or capacity
+exhaustion returns `resource_exhausted`; values are never truncated. The server
+validates one stored conversation at a time while projecting the list. The legacy
+`offset` interface remains available but has no snapshot guarantees.
+
+`provider.catalog` requires authentication and returns version 1, a catalog revision,
+and `providers` with IDs, names, adapter types, `custom_model_id`, key-selection
+metadata, and `models`. Each model has an ID, display name, `text_generation`,
+`availability`, and nullable context/output limits (null means unknown). Availability
+is `available`, `credential_unavailable`, `key_selection_required`, `unsupported`,
+or `unavailable`; it reflects credential and adapter checks at the time of the request. Runtime
+settings and upstream access are validated separately when executing; `available`
+does not guarantee a successful run. For multiple keys, select an advertised key ID
+explicitly; actual credential availability is checked at execution. An unrestricted
+provider permits custom IDs and its displayed catalog need not be exhaustive. No
+credential, credential reference, endpoint, or raw provider configuration is returned.
+
+### Device identity revocation
+
+A paired HTTP client can explicitly revoke its **own** identity with `POST
+/v1/revoke` and an authenticated bearer token. The request body must be empty;
+the endpoint does not accept a target client ID. Success returns
+`{"revoked":true}`. The server removes that identity's pairing credentials
+and terminates its active sessions/streams; previously issued bearer tokens,
+future authentication, and new RPCs under that identity all fail. A second
+request using the revoked token returns HTTP 401 (already revoked), not a
+second success. Other paired identities remain usable.
+
+Durable conversations owned by the revoked identity are **not deleted**, but
+they are no longer accessible to a newly paired identity because each pairing
+has separate history. Back up/import or retain the existing pairing when
+continued access is required. Removing a connection locally does not call this
+endpoint automatically. Do not treat `session.close` as revocation.
+
+Session ownership is the authenticated paired `client_id`. Independently paired
+devices have separate histories, even when connected to the same server. There is
+currently no shared-account workspace; pairing another device does not grant it
+access to an existing device's conversations.
+
+Capabilities include `chat_features` version 1, which describes runtime sources,
+provider adapters, supported chat features, the whole-conversation size limit,
+and workspace scope. Adapter availability does not imply that a particular
+configured provider or credential is usable; unsupported settings still return
+an explicit error.
+
+### Chunked conversation transfer (version 1)
+
+Normal `session.open`, `session.get`, `session.save`, and conversation events remain
+limited to 3 MiB. For larger saved conversations, `session.open_chunked` with an
+empty data object opens or creates the session and returns `{version:1, session_id,
+revision, size}` without returning the conversation. `session.read_chunk` accepts
+`{revision, offset, limit}` and returns `{revision, offset, data, done}`; `data` is
+base64-encoded bytes, and `limit` is at most 262144 bytes. Concatenate the bytes in
+order and decode UTF-8 only after the final chunk. A revision change returns
+`revision_conflict`; discard partial data and reopen. Reads are bound to the paired
+client identity and the session ID. Reopen after reconnect or server restart.
+
+For a CAS edit, `session.upload.begin` accepts `{expected_revision, size, sha256,
+idempotency_key}` where `sha256` is lowercase hexadecimal over the exact UTF-8 JSON
+bytes. It returns `{version, upload_id, chunk_max_bytes}`. Send sequential
+`session.upload.chunk` calls with `{upload_id, offset, data}` (base64), following
+`next_offset`, then call `session.upload.commit` with `{upload_id}`. Successful commit
+returns the new `session_id`, `revision`, and `size`; retrying that commit with the
+same upload ID returns the same result. A repeated identical chunk is accepted;
+out-of-order, overlapping-different, incomplete, wrong-hash, cross-owner or
+cross-session uploads are rejected. `session.upload.abort` releases an upload.
+The upload is RAM-only, expires after 10 minutes, and does not survive restart; four
+uploads of at most 8 MiB each are permitted process-wide. Reconnects to the same
+server process can continue with the upload ID and acknowledged offset. After an
+ambiguous commit or restart, reopen and compare the revision and content before any
+new edit; do not blindly replay it. Storage-envelope validation can impose a lower
+limit on exceptionally expansive JSON structures. Generation still requires a
+whole conversation within 3 MiB and does not support large-history streaming.
+
+Selected instruction IDs require explicit transient `runtime.instructions` mapping
+from each selected ID to its text. Up to 32 selected instructions of at most 16 KiB
+each are sent in selection order as system messages, ahead of summary and chat
+history. Missing IDs, duplicates, empty text, and oversized instructions fail closed.
+Both stored and mobile-ephemeral runtimes support this explicit handoff; the server
+does not resolve IDs from a server-owned instruction catalog or persist the supplied
+instruction text in the conversation. Reasoning/tool histories and attachments are
+still rejected, not discarded. `chat_features.negotiation` version 1 describes
+adapter-specific supported parameters, history, modalities and bounds. Provider
+catalog key availability is non-secret; `available` is not a guarantee of upstream
+availability or acceptance of every model-specific setting.
 
 `data.storage` from older v5 prototypes is ignored for interoperability, not used to choose server persistence. Clients should omit it in all new requests.
 
@@ -151,9 +277,9 @@ sequenceDiagram
 - Mobile-supplied provider/MCP credentials disappear after close, TTL expiry or server restart. Recovery can read the chat, but **new generation requires a new runtime handoff**.
 - Never blindly replay an uncertain model/tool call; the server stores request receipts and may return `request_already_recorded`. Exactly-once effects outside the server cannot be guaranteed across all failures.
 - Within the same active session, repeating a run with the same request ID and content returns the acknowledgement without starting another call; changing the content returns `request_already_recorded`. After reopening, a recorded request is rejected rather than executed again.
-- Current logical conversation size is limited by a 4 MiB protocol frame and about 3 MiB stored snapshot handoff; larger chunked uploads/downloads are **future work**.
+- Frames remain limited to 4 MiB and whole-conversation RPCs to 3 MiB; chunked transfer supports up to 8 MiB as described above. Generation of conversations above 3 MiB remains unsupported.
 - Transport fallback stays within paired authorization groups: TCP ↔ SSH, WSS ↔ HTTPS.
 
 ## 6. Integration restrictions
 
-This file documents the Go server API and prospective protocol consumers only. It does not authorize modifying, building or testing `~/generative`. Future UI/Room integration requires a separate decision. The server-side tests cover the core durable conversations, provider/MCP credential isolation and transport semantics; additional corrupted-data, large-snapshot and adversarial failover tests remain open.
+The server tests cover durable conversations, bounded chunk transfer, provider/MCP credential isolation and transport semantics. End-to-end device, corrupted-data and adversarial failover coverage remains incomplete.
