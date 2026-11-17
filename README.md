@@ -1,6 +1,6 @@
 # serverside-generative
 
-Self-hosted Go session runtime offering one v5 JSON RPC API over TLS/TCP, SSH stdio, WebSocket and HTTP/SSE. Its wire format is designed for prospective Generative-compatible clients, **but no Kotlin/Android app integration has been authorized or implemented**. `~/generative` remains untouched.
+Self-hosted Go session runtime offering one v5 JSON RPC API over TLS/TCP, SSH stdio, WebSocket and HTTP/SSE. Its v5 API supports the Generative Android **Server Connection** workspace; each paired client has its own server-side conversation history.
 
 ## Architecture and pairing
 
@@ -41,7 +41,17 @@ The built client is checked in under `internal/node/web` and embedded in the Go 
 
 ## Install (no Go toolchain required on the deployed server)
 
-Download a prebuilt `serverside` CLI from CI or a release, or build from source using Go 1.26.10+:
+Install the **latest published GitHub Release**, including pre-releases, on Linux or macOS (x86-64 / arm64):
+
+```sh
+curl -fsSLo install-serverside.sh https://raw.githubusercontent.com/starfall-org/serverside-generative/main/install.sh
+sh install-serverside.sh
+serverside version
+```
+
+The installer selects the binary for your OS/CPU, verifies it against the release's `SHA256SUMS` manifest, and atomically installs `serverside` into a user-writable directory on your existing `PATH`. If none is available, it uses `~/.local/bin` and adds that directory to your login shell's `PATH` configuration (open a new shell afterward). **No `sudo` is invoked automatically.** It requires `curl`, `python3` and `sha256sum` or `shasum`. Review the downloaded script before executing it. To pin a particular release, set `SERVERSIDE_TAG=v0.5.0-alpha` when running the script; to choose a destination, set `INSTALL_DIR=/absolute/path` (which must be writable).
+
+To build from source instead, install Go 1.26.10+ and run:
 
 ```sh
 go build -trimpath -ldflags='-s -w' -o serverside ./cmd/serverside-generative
