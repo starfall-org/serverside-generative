@@ -27,6 +27,7 @@ import (
 	"github.com/starfall-org/serverside-generative/internal/migration"
 	"github.com/starfall-org/serverside-generative/internal/node"
 	"github.com/starfall-org/serverside-generative/internal/secrets"
+	"github.com/starfall-org/serverside-generative/internal/service"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -40,7 +41,7 @@ func main() {
 }
 func usage() {
 	fmt.Fprintln(os.Stderr, "serverside: paired session runtime")
-	fmt.Fprintln(os.Stderr, "Commands: serve, handshake --stdio, pair, stream, manage, version, config, provider, model, mcp, profile, tool, chat")
+	fmt.Fprintln(os.Stderr, "Commands: serve, service, handshake --stdio, pair, stream, manage, version, config, provider, model, mcp, profile, tool, chat")
 }
 func defaultIPC() string {
 	dir, _ := os.UserConfigDir()
@@ -123,6 +124,12 @@ func run(args []string) error {
 		return flag.ErrHelp
 	}
 	switch args[0] {
+	case "service":
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		return service.Run(args[1:], exe)
 	case "stream":
 		fs := flag.NewFlagSet("stream", flag.ContinueOnError)
 		stdio := fs.Bool("stdio", false, "bridge framed v5 data over stdin/stdout")

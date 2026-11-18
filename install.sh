@@ -147,3 +147,8 @@ else
     printf '\n%s is not in your PATH; add it to your shell profile before invoking serverside by name.\n' "$target_dir"
     printf 'Run immediately: %s/serverside version\n' "$target_dir"
 fi
+
+# Install and start the user-owned service by default; allow binary-only installs.
+if [ "${SERVERSIDE_INSTALL_SERVICE:-1}" = 1 ]; then
+    "$target_dir/serverside" service install -- "$@" || fail 'binary installed, but service setup failed (check service logs)'
+fi

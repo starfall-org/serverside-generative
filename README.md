@@ -58,7 +58,39 @@ go build -trimpath -ldflags='-s -w' -o serverside ./cmd/serverside-generative
 ./serverside version
 ```
 
-### Start the daemon
+### Run as a managed service
+
+```sh
+serverside service install -- --tcp-listen 127.0.0.1:7090 --http-listen 127.0.0.1:7091
+serverside service status
+serverside service logs
+serverside service stop
+serverside service start
+serverside service restart
+serverside service uninstall
+```
+
+The installer automatically installs and starts the service for the current user, without root privileges, when installing a release that includes the service commands. Additional installer arguments are passed to `serve`. To install only the binary without registering or starting the service, run `SERVERSIDE_INSTALL_SERVICE=0 sh install-serverside.sh`.
+Flags after `--` are passed to `serve`. Stop a manually launched daemon before
+installing the service. Uninstalling the service does not remove chat or pairing
+data. Reinstall to change persistent serve flags.
+
+- Linux with an active user Systemd manager: installs and enables a unit with
+  automatic restart. To start at machine boot even before login, enable user
+  lingering with `loginctl enable-linger "$USER"` where supported.
+- macOS: installs a LaunchAgent with RunAtLoad and KeepAlive, starting at login.
+- Other Linux environments: the built-in native supervisor detaches from the
+  terminal and restarts the server on exit, without external dependencies.
+  For a full machine reboot, configure the host's startup hook to invoke
+  `serverside service start`. No process can survive destruction of its host.
+
+Use `--backend native`, `--backend systemd`, or `--backend launchd` before
+`--` to select a backend explicitly. Use an absolute path for data and identity
+directories; services preserve the installation working directory. Do not put
+passwords in service arguments. A public HTTPS reverse proxy needs its own
+service manager.
+
+### Start the daemon manually
 
 ```sh
 ./serverside serve \
