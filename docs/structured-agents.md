@@ -8,7 +8,7 @@ turn an agent CLI into a model-callable server tool.
 Enable it explicitly:
 
 ```sh
-serverside serve --enable-agent --agent-root /srv/projects --http-listen off
+generative serve --enable-agent --agent-root /srv/projects --http-listen off
 ```
 
 The daemon uses the existing authenticated TLS data channel and context-sync

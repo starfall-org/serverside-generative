@@ -40,7 +40,7 @@ func main() {
 	}
 }
 func usage() {
-	fmt.Fprintln(os.Stderr, "serverside: paired session runtime")
+	fmt.Fprintln(os.Stderr, "generative: paired session runtime")
 	fmt.Fprintln(os.Stderr, "Commands: serve, service, handshake --stdio, pair, stream, manage, version, config, provider, model, mcp, profile, tool, chat")
 }
 func defaultIPC() string {
@@ -144,7 +144,7 @@ func run(args []string) error {
 	case "manage":
 		return runManage(args[1:], os.Stdin, os.Stdout)
 	case "version":
-		fmt.Println("serverside", version)
+		fmt.Println("generative", version)
 		return nil
 	case "handshake", "ticket", "pair":
 		fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
@@ -937,7 +937,7 @@ func run(args []string) error {
 		fmt.Println("Data transport (TLS 1.3):", listener.Addr().String())
 		fmt.Println("Advertised endpoint:     ", ep)
 		fmt.Println("Server TLS fingerprint:  ", n.Fingerprint)
-		fmt.Println("TCP pairing (SSH only):   ssh -T USER@HOST serverside pair --stdio --transport tcp")
+		fmt.Println("TCP pairing (SSH only):   ssh -T USER@HOST generative pair --stdio --transport tcp")
 		fmt.Println("Pairing control socket:  ", sock)
 		if *allowLegacyPairing {
 			fmt.Println("WARNING: legacy new-device pairing enabled for v4 migration")

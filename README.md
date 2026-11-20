@@ -14,12 +14,12 @@ See [server implementation plans](plans/README.md), [v5 API contract](docs/clien
 
 | Client connection type | One-time pairing | Subsequent data traffic |
 | --- | --- | --- |
-| **TCP** | **SSH only:** `ssh -T USER@HOST serverside pair --stdio --transport tcp`. Strict SSH host-key verification required. Result contains durable `client_id`, secret, TLS certificate SHA-256 fingerprint and the direct TCP address. | TLS/TCP on the configured port, with the same identity also valid over **SSH stdio fallback** when a future client implements TCP reachability fallback. No new pairing on reconnect. |
+| **TCP** | **SSH only:** `ssh -T USER@HOST generative pair --stdio --transport tcp`. Strict SSH host-key verification required. Result contains durable `client_id`, secret, TLS certificate SHA-256 fingerprint and the direct TCP address. | TLS/TCP on the configured port, with the same identity also valid over **SSH stdio fallback** when a future client implements TCP reachability fallback. No new pairing on reconnect. |
 | **HTTP / WebSocket** | **One HTTPS pairing URL**, shown as selectable/copyable text **and** an identical optional QR. The URL's fragment contains a short-lived one-time code and client-visible SPKI pin. Future clients may copy/open/scan it, validate HTTPS/SPKI and redeem the code through `POST /v1/pair` to obtain durable `client_id` and secret. | HTTPS `/v1/auth` yields a short-lived bearer token for `/v1/rpc` and `/v1/events`; or use authenticated `/v1/ws` for full two-way RPC/events. The same HTTP/WS identity authorizes both; it does **not** authorize direct TCP or SSH. |
 
 **QR is not required and is not a different credential or handshake from the displayed URL.** Copying the full URL (including fragment) and scanning its QR must give the same result. Do not place persistent device secrets in URLs or QR. A QR URL code is single-use and expires; protect it as you would a temporary login link.
 
-The server needs a reachable SSH service for SSH pairing or fallback; it does **not** embed an SSH daemon or need a public Generative-specific TCP port for SSH stdio. The SSH command `serverside stream --stdio` forwards binary protocol-v5 frames to the **running daemon's private Unix data socket**, not through SSH port forwarding or a second server. The daemon still verifies the paired device identity. TCP fallback is only attempted on reachability failures, not on a rejected TLS certificate or authorization failure. WSS and HTTPS share one HTTP/WS-scoped identity. A future client may fall back to HTTPS RPC/polling on unreachable WSS, but must not downgrade on TLS or authorization failures. The server supports interrupted-stream recovery with event cursors; no Android-side automatic migration has been implemented. Never blindly replay a possibly executed model/tool request after disconnection.
+The server needs a reachable SSH service for SSH pairing or fallback; it does **not** embed an SSH daemon or need a public Generative-specific TCP port for SSH stdio. The SSH command `generative stream --stdio` forwards binary protocol-v5 frames to the **running daemon's private Unix data socket**, not through SSH port forwarding or a second server. The daemon still verifies the paired device identity. TCP fallback is only attempted on reachability failures, not on a rejected TLS certificate or authorization failure. WSS and HTTPS share one HTTP/WS-scoped identity. A future client may fall back to HTTPS RPC/polling on unreachable WSS, but must not downgrade on TLS or authorization failures. The server supports interrupted-stream recovery with event cursors; no Android-side automatic migration has been implemented. Never blindly replay a possibly executed model/tool request after disconnection.
 
 **New-device legacy pairing is disabled by default:** `POST /v1/handshake`, `GET /v1/handshake/ws`, Human Relay PIN/QR and v4 TCP ticket enrollment cannot create new identities. Existing already-paired v4 clients continue to work. An explicit **temporary migration flag** `--allow-legacy-pairing` enables the old enrollment methods for old clients; remove the flag after migration. Password handshake alone does not replace the new connection-type-specific flows.
 
@@ -33,44 +33,46 @@ The server needs a reachable SSH service for SSH pairing or fallback; it does **
 
 ## Web chat client
 
-The HTTP listener serves the embedded chat client at `/` and `/connect`. Start `serverside serve`, then run `serverside pair --stdio --transport http-local` on the server and enter the one-time code at `http://127.0.0.1:7091/`. The code is redeemable only from the local machine. The browser stores the paired credential in local storage so it can reopen the same chat history; disconnecting clears it. Use a trusted browser profile.
+The HTTP listener serves the embedded chat client at `/` and `/connect`. Start `generative serve`, then run `generative pair --stdio --transport http-local` on the server and enter the one-time code at `http://127.0.0.1:7091/`. The code is redeemable only from the local machine. The browser stores the paired credential in local storage so it can reopen the same chat history; disconnecting clears it. Use a trusted browser profile.
 
 Select a server-managed provider/model or enter temporary provider credentials in the Model settings. Chats are stored on the server. Temporary provider credentials stay in browser and server memory. To access the web client remotely, use the HTTPS pairing URL and a trusted reverse proxy; the browser cannot independently verify the SPKI pin shown in the invitation.
 
-The built client is checked in under `internal/node/web` and embedded in the Go binary. To modify it, run `npm ci --prefix web`, `npm run build --prefix web`, then `go build -o serverside ./cmd/serverside-generative`.
+The built client is checked in under `internal/node/web` and embedded in the Go binary. To modify it, run `npm ci --prefix web`, `npm run build --prefix web`, then `go build -o generative ./cmd/generative`.
 
 ## Install (no Go toolchain required on the deployed server)
 
 Install the **latest published GitHub Release**, including pre-releases, on Linux or macOS (x86-64 / arm64):
 
 ```sh
-curl -fsSLo install-serverside.sh https://raw.githubusercontent.com/starfall-org/serverside-generative/main/install.sh
-sh install-serverside.sh
-serverside version
+curl -fsSLo install-generative.sh https://raw.githubusercontent.com/starfall-org/serverside-generative/main/install.sh
+sh install-generative.sh
+generative version
 ```
 
-The installer selects the binary for your OS/CPU, verifies it against the release's `SHA256SUMS` manifest, and atomically installs `serverside` into a user-writable directory on your existing `PATH`. If none is available, it uses `~/.local/bin` and adds that directory to your login shell's `PATH` configuration (open a new shell afterward). **No `sudo` is invoked automatically.** It requires `curl`, `python3` and `sha256sum` or `shasum`. Review the downloaded script before executing it. To pin a particular release, set `SERVERSIDE_TAG=v0.5.0-alpha` when running the script; to choose a destination, set `INSTALL_DIR=/absolute/path` (which must be writable).
+The installer selects the binary for your OS/CPU, verifies it against the release's `SHA256SUMS` manifest, and atomically installs `generative` into a user-writable directory on your existing `PATH`. If none is available, it uses `~/.local/bin` and adds that directory to your login shell's `PATH` configuration (open a new shell afterward). **No `sudo` is invoked automatically.** It requires `curl`, `python3` and `sha256sum` or `shasum`. Review the downloaded script before executing it. To pin a particular release, set `SERVERSIDE_TAG=v0.5.0-alpha` when running the script; to choose a destination, set `INSTALL_DIR=/absolute/path` (which must be writable).
 
 To build from source instead, install Go 1.26.10+ and run:
 
 ```sh
-go build -trimpath -ldflags='-s -w' -o serverside ./cmd/serverside-generative
-./serverside version
+go build -trimpath -ldflags='-s -w' -o generative ./cmd/generative
+./generative version
 ```
 
 ### Run as a managed service
 
 ```sh
-serverside service install -- --tcp-listen 127.0.0.1:7090 --http-listen 127.0.0.1:7091
-serverside service status
-serverside service logs
-serverside service stop
-serverside service start
-serverside service restart
-serverside service uninstall
+generative service install -- --tcp-listen 127.0.0.1:7090 --http-listen 127.0.0.1:7091
+generative service status
+generative service logs
+generative service stop
+generative service start
+generative service restart
+generative service uninstall
 ```
 
-The installer automatically installs and starts the service for the current user, without root privileges, when installing a release that includes the service commands. Additional installer arguments are passed to `serve`. To install only the binary without registering or starting the service, run `SERVERSIDE_INSTALL_SERVICE=0 sh install-serverside.sh`.
+The installer automatically installs and starts the service for the current user, without root privileges, when installing a release that includes the service commands. Additional installer arguments are passed to `serve`. To install only the binary without registering or starting the service, run `SERVERSIDE_INSTALL_SERVICE=0 sh install-generative.sh`.
+Existing installations using the old executable name should uninstall the old service with `serverside service uninstall` before installing the renamed CLI, then reuse the same serve flags. The service identifiers and data/identity paths are unchanged.
+
 Flags after `--` are passed to `serve`. Stop a manually launched daemon before
 installing the service. Uninstalling the service does not remove chat or pairing
 data. Reinstall to change persistent serve flags.
@@ -82,7 +84,7 @@ data. Reinstall to change persistent serve flags.
 - Other Linux environments: the built-in native supervisor detaches from the
   terminal and restarts the server on exit, without external dependencies.
   For a full machine reboot, configure the host's startup hook to invoke
-  `serverside service start`. No process can survive destruction of its host.
+  `generative service start`. No process can survive destruction of its host.
 
 Use `--backend native`, `--backend systemd`, or `--backend launchd` before
 `--` to select a backend explicitly. Use an absolute path for data and identity
@@ -93,7 +95,7 @@ service manager.
 ### Start the daemon manually
 
 ```sh
-./serverside serve \
+./generative serve \
   --tcp-listen 0.0.0.0:7090 \
   --advertise server.example.com:7090 \
   --http-listen 127.0.0.1:7091
@@ -105,13 +107,13 @@ Use a correctly configured **HTTPS reverse proxy** for clients reaching HTTP/WS 
 
 ```sh
 ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes USER@HOST \
-  serverside pair --stdio --transport tcp
+  generative pair --stdio --transport tcp
 ```
 
 It emits one JSON object containing `client_id`, `secret`, `fingerprint`, `endpoint` and `transport:"tcp"`. A future client must store the paired secret in a platform-protected credential store. Subsequent TLS/TCP connections authenticate with that pair, and SSH fallback uses the same pair:
 
 ```sh
-ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes USER@HOST serverside stream --stdio
+ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes USER@HOST generative stream --stdio
 ```
 
 Use `--data-socket PATH` for a non-default daemon socket. Never allocate a PTY or pass client secrets in SSH argv. Only trusted SSH users should be able to run the pairing command. TCP pairing **does not** use a QR, HTTP request or PIN.
@@ -121,7 +123,7 @@ Use `--data-socket PATH` for a non-default daemon socket. Never allocate a PTY o
 The server must already be running with a reachable `https://` hostname and valid client-visible TLS identity. Run on the server (or a trusted shell session):
 
 ```sh
-serverside pair --transport http \
+generative pair --transport http \
   --endpoint https://server.example.com \
   --pin 'sha256/BASE64_SPKI_PIN'
 ```
@@ -129,7 +131,7 @@ serverside pair --transport http \
 The command displays the **complete copyable URL and the matching QR**. A future client may paste/open the complete URL or scan the matching QR; all use the same one-time `POST /v1/pair` exchange. On success it must securely store the HTTP/WS-scoped `client_id` and `secret`. Reconnects do not need the code or QR again. Cancel outstanding codes with:
 
 ```sh
-serverside pair --transport http --cancel
+generative pair --transport http --cancel
 ```
 
 For HTTP requests, exchange the saved credentials using `POST /v1/auth`; send the returned 15-minute bearer token in the `Authorization` header for `POST /v1/rpc` and `GET /v1/events`. WebSocket uses `GET /v1/ws` plus a single authenticated JSON message, then the same v5 RPC payloads. `GET /v1/capabilities` reports supported operations/transports without exposing private catalog data.
@@ -137,36 +139,36 @@ For HTTP requests, exchange the saved credentials using `POST /v1/auth`; send th
 ### Manage the nonsecret catalog and encrypted credentials
 
 ```sh
-serverside config init
-serverside config validate
-serverside config export --kind providers --out /tmp/providers.yaml
-serverside config diff --kind providers --file /tmp/providers-edited.yaml
-serverside config import --kind providers --file /tmp/providers-edited.yaml --if-revision 1 --dry-run
-serverside config import --kind providers --file /tmp/providers-edited.yaml --if-revision 1
-EDITOR=vi serverside manage
-serverside provider key set PROVIDER_ID --key-id main --stdin --if-revision 2
-serverside mcp credential set SERVER_ID --method bearer --stdin --if-revision 3
-serverside provider group add --id research --name Research --sort-order 1 --if-revision 4
-serverside provider group edit --id research --name "Research models" --sort-order 2 --if-revision 5
-serverside provider group assign --provider-id PROVIDER_ID --group-id research --if-revision 6
-serverside provider group clear --provider-id PROVIDER_ID --if-revision 7
-serverside provider group delete --id research --if-revision 8
+generative config init
+generative config validate
+generative config export --kind providers --out /tmp/providers.yaml
+generative config diff --kind providers --file /tmp/providers-edited.yaml
+generative config import --kind providers --file /tmp/providers-edited.yaml --if-revision 1 --dry-run
+generative config import --kind providers --file /tmp/providers-edited.yaml --if-revision 1
+EDITOR=vi generative manage
+generative provider key set PROVIDER_ID --key-id main --stdin --if-revision 2
+generative mcp credential set SERVER_ID --method bearer --stdin --if-revision 3
+generative provider group add --id research --name Research --sort-order 1 --if-revision 4
+generative provider group edit --id research --name "Research models" --sort-order 2 --if-revision 5
+generative provider group assign --provider-id PROVIDER_ID --group-id research --if-revision 6
+generative provider group clear --provider-id PROVIDER_ID --if-revision 7
+generative provider group delete --id research --if-revision 8
 ```
 
 Catalog `--if-revision` is optimistic concurrency control: update the revision shown by `config validate`/catalog output before applying changes. These commands reject credentials in YAML; enter sensitive values only through explicitly supported encrypted-store `--stdin` commands. The TUI uses your editor on a private temporary file and confirms before publishing validated changes.
 
-All v5 chats can be inspected and edited from durable server JSON without persisting mobile-supplied runtime secrets. Use `serverside chat validate-all --client-id OWNER_ID` to check the chat directory for malformed snapshots and tombstones without writing files. After directly editing a valid stored snapshot, `serverside chat reload --id CHAT_ID --client-id OWNER_ID --if-revision REVISION` validates it, saves the exact pre-reload envelope under the private `.backups/chats/` directory, and publishes a new revision; use `--dry-run` to check first. Backups contain plaintext chat data and preserve the hand edit, not an earlier known-good version. Active sessions must close and reopen to adopt an external edit. Server CLI mutations take the persistent chat job lease before committing. Direct file editors do not take that lock, so stop concurrent writers while hand-editing to avoid a race with the final atomic replacement. Use `serverside chat list --client-id OWNER_ID` to find the current chat revision, then:
+All v5 chats can be inspected and edited from durable server JSON without persisting mobile-supplied runtime secrets. Use `generative chat validate-all --client-id OWNER_ID` to check the chat directory for malformed snapshots and tombstones without writing files. After directly editing a valid stored snapshot, `generative chat reload --id CHAT_ID --client-id OWNER_ID --if-revision REVISION` validates it, saves the exact pre-reload envelope under the private `.backups/chats/` directory, and publishes a new revision; use `--dry-run` to check first. Backups contain plaintext chat data and preserve the hand edit, not an earlier known-good version. Active sessions must close and reopen to adopt an external edit. Server CLI mutations take the persistent chat job lease before committing. Direct file editors do not take that lock, so stop concurrent writers while hand-editing to avoid a race with the final atomic replacement. Use `generative chat list --client-id OWNER_ID` to find the current chat revision, then:
 
 ```sh
-EDITOR=vi serverside chat edit --client-id OWNER_ID --id CHAT_ID --if-revision REVISION --dry-run
-EDITOR=vi serverside chat edit --client-id OWNER_ID --id CHAT_ID --if-revision REVISION --yes
+EDITOR=vi generative chat edit --client-id OWNER_ID --id CHAT_ID --if-revision REVISION --dry-run
+EDITOR=vi generative chat edit --client-id OWNER_ID --id CHAT_ID --if-revision REVISION --yes
 ```
 
 `chat edit` validates the full Conversation, rejects unsafe editor files and saves only if the owner and expected revision still match. It never edits transient provider/MCP runtime configuration. A dry run validates but does not save; `--yes` is required to publish a changed chat. Other clients or active sessions must explicitly refresh their snapshots; this command does not push changes into an already running generation.
 
 ### Legacy v4 interoperability (migration only)
 
-If an unpaired **old v4 client** absolutely requires password/QR/PIN enrollment, start the server explicitly with `--allow-legacy-pairing` (and optional `--password` or `--human`). This overrides the new TCP-only-SSH pairing requirement **temporarily** and must not be used in normal v5 deployment. Already-paired v4 data sessions need no migration flag to reconnect. Old `serverside handshake --stdio`, Human Relay and `/v1/handshake` are migration paths only.
+If an unpaired **old v4 client** absolutely requires password/QR/PIN enrollment, start the server explicitly with `--allow-legacy-pairing` (and optional `--password` or `--human`). This overrides the new TCP-only-SSH pairing requirement **temporarily** and must not be used in normal v5 deployment. Already-paired v4 data sessions need no migration flag to reconnect. Old `generative handshake --stdio`, Human Relay and `/v1/handshake` are migration paths only.
 
 ## Test session handoff and offline execution
 
@@ -254,7 +256,7 @@ The model SDK adapters currently support **text streaming only**; model tool cal
 
 ## Built-in server terminal tools (opt-in)
 
-`serverside` includes these native tools for authenticated, paired clients:
+`generative` includes these native tools for authenticated, paired clients:
 
 | Tool | What it does |
 | --- | --- |
@@ -265,10 +267,10 @@ The model SDK adapters currently support **text streaming only**; model tool cal
 | `terminal_list` | List terminals currently running on this personal server |
 | `tools_list` | Discover built-in tool schemas and whether terminal execution is enabled |
 
-**Terminal execution is disabled by default** because it grants arbitrary OS command execution with the permissions of the `serverside` process. On a machine you control, use a dedicated **unprivileged OS account** and working directory:
+**Terminal execution is disabled by default** because it grants arbitrary OS command execution with the permissions of the `generative` process. On a machine you control, use a dedicated **unprivileged OS account** and working directory:
 
 ```bash
-./serverside serve --enable-terminal --terminal-cwd /srv/generative-work
+./generative serve --enable-terminal --terminal-cwd /srv/generative-work
 ```
 
 Then, using a paired Python test client:

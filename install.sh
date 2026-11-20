@@ -8,7 +8,7 @@ repo=starfall-org/serverside-generative
 api=https://api.github.com/repos/$repo/releases
 base=https://github.com/$repo/releases/download
 
-fail() { printf 'serverside installer: %s\n' "$*" >&2; exit 1; }
+fail() { printf 'generative installer: %s\n' "$*" >&2; exit 1; }
 for tool in curl python3 mktemp uname chmod cp mv mkdir rm awk grep; do
     command -v "$tool" >/dev/null 2>&1 || fail "missing required command: $tool"
 done
@@ -56,7 +56,7 @@ fi
 printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?$' \
     || fail "invalid release tag: $tag"
 
-printf 'Downloading ServerSide %s for %s/%s...\n' "$tag" "$os" "$arch"
+printf 'Downloading Generative %s for %s/%s...\n' "$tag" "$os" "$arch"
 for name in "$asset" SHA256SUMS; do
     curl --fail --silent --show-error --location --retry 3 \
         --proto '=https' --proto-redir '=https' "$base/$tag/$name" -o "$tmp/$name" \
@@ -112,14 +112,14 @@ mkdir -p "$target_dir" || fail "cannot create $target_dir (use INSTALL_DIR for a
 [ -d "$target_dir" ] && [ -w "$target_dir" ] || fail "directory is not writable: $target_dir"
 
 # Copy to a separate file and rename within the target filesystem atomically.
-staged=$(mktemp "$target_dir/.serverside.XXXXXXXX") || fail "cannot stage binary in $target_dir"
+staged=$(mktemp "$target_dir/.generative.XXXXXXXX") || fail "cannot stage binary in $target_dir"
 trap 'rm -f "$staged"; rm -rf "$tmp"' EXIT
 cp "$tmp/$asset" "$staged" || fail 'cannot copy downloaded binary'
 chmod 755 "$staged" || fail 'cannot set executable permissions'
-mv -f "$staged" "$target_dir/serverside" || fail 'cannot install serverside executable'
-printf 'Installed %s to %s/serverside\n' "$tag" "$target_dir"
+mv -f "$staged" "$target_dir/generative" || fail 'cannot install generative executable'
+printf 'Installed %s to %s/generative\n' "$tag" "$target_dir"
 if in_path "$target_dir"; then
-    printf 'Run: serverside version\n'
+    printf 'Run: generative version\n'
 elif [ -z "${INSTALL_DIR:-}" ] && [ "$target_dir" = "$HOME/.local/bin" ]; then
     # Ensure the fallback directory is discoverable in future login shells.
     # This does not modify the PATH of the invoking shell (which is impossible
@@ -138,17 +138,17 @@ elif [ -z "${INSTALL_DIR:-}" ] && [ "$target_dir" = "$HOME/.local/bin" ]; then
               printf '%s\n' 'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH"; export PATH ;; esac';
             } >> "$profile" || fail "cannot update PATH in $profile"
         fi
-        printf 'Added ~/.local/bin to PATH in %s. Open a new login shell, then run: serverside version\n' "$profile"
+        printf 'Added ~/.local/bin to PATH in %s. Open a new login shell, then run: generative version\n' "$profile"
     else
         printf 'Could not edit your shell startup file. Add ~/.local/bin to PATH manually.\n'
-        printf 'Run immediately: %s/serverside version\n' "$target_dir"
+        printf 'Run immediately: %s/generative version\n' "$target_dir"
     fi
 else
-    printf '\n%s is not in your PATH; add it to your shell profile before invoking serverside by name.\n' "$target_dir"
-    printf 'Run immediately: %s/serverside version\n' "$target_dir"
+    printf '\n%s is not in your PATH; add it to your shell profile before invoking generative by name.\n' "$target_dir"
+    printf 'Run immediately: %s/generative version\n' "$target_dir"
 fi
 
 # Install and start the user-owned service by default; allow binary-only installs.
 if [ "${SERVERSIDE_INSTALL_SERVICE:-1}" = 1 ]; then
-    "$target_dir/serverside" service install -- "$@" || fail 'binary installed, but service setup failed (check service logs)'
+    "$target_dir/generative" service install -- "$@" || fail 'binary installed, but service setup failed (check service logs)'
 fi

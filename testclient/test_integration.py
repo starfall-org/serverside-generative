@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import client  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-BINARY = Path(os.environ.get("SERVER_BINARY", str(ROOT / "serverside")))
+BINARY = Path(os.environ.get("SERVER_BINARY", str(ROOT / "generative")))
 PASSWORD = "integration-test-password-1234"
 
 

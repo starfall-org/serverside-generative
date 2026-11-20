@@ -35,7 +35,7 @@ Every ServerSide session uses durable chat storage. Provider/MCP credentials **s
 | `GET /v1/events?session_id=...&after=...` | Server events by SSE (default) or JSON long poll (`Accept: application/json`) | Same bearer |
 | `GET /v1/ws` | Full-duplex JSON RPC and events | WS `auth` text frame first |
 | TLS/TCP | Length-prefixed JSON frames (4-byte big-endian size) | SSH-enrolled TCP identity |
-| `serverside stream --stdio` | Same framed RPC via SSH + private daemon socket | SSH-enrolled TCP identity |
+| `generative stream --stdio` | Same framed RPC via SSH + private daemon socket | SSH-enrolled TCP identity |
 
 Public HTTP requires correctly configured TLS/reverse proxy. Plaintext HTTP data API is allowed only on loopback, under the server's security policy. `/connect` serves the embedded developer console. Browsers cannot verify the invitation SPKI pin; verify the HTTPS certificate independently before redeeming the code.
 
@@ -63,7 +63,7 @@ sequenceDiagram
 
 The server displays `https://host/connect#code=...&pin=sha256%2F...&v=1` as full copyable text and a QR with exactly the same URL. Never put the one-time fragment code into HTTP paths, logs or durable files. WebSocket first sends `{"type":"auth","protocol":5,"client_id":"...","secret":"..."}` and receives `{"type":"paired","protocol":5,"client_id":"..."}`.
 
-**TCP is enrolled only via authenticated SSH**, e.g. `ssh -T USER@HOST serverside pair --stdio --transport tcp`. The resulting identity can use TCP or the SSH stdio fallback, but not HTTP/WS without explicit separate pairing. An HTTP/WS URL-paired identity cannot be used to enroll a TCP client.
+**TCP is enrolled only via authenticated SSH**, e.g. `ssh -T USER@HOST generative pair --stdio --transport tcp`. The resulting identity can use TCP or the SSH stdio fallback, but not HTTP/WS without explicit separate pairing. An HTTP/WS URL-paired identity cannot be used to enroll a TCP client.
 
 ## 4. Canonical RPC and automatic conversation delivery
 

@@ -12,7 +12,7 @@ import (
 func (n *Node) agentAction(msg Message) (any, error) {
 	mgr := n.Agents
 	if mgr == nil {
-		return nil, errors.New("agent runtime disabled; start serverside with --enable-agent")
+		return nil, errors.New("agent runtime disabled; start generative with --enable-agent")
 	}
 	switch msg.Type {
 	case "agent_open":

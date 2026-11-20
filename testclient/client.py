@@ -3,7 +3,7 @@
 
 Usage:
   python3 testclient/client.py pair --method http --url http://127.0.0.1:7091 --password 'long-secret' --state /tmp/client.json
-  python3 testclient/client.py pair --method ssh --ssh-command './serverside handshake --stdio' --state /tmp/client.json
+  python3 testclient/client.py pair --method ssh --ssh-command './generative handshake --stdio' --state /tmp/client.json
   python3 testclient/client.py pair --method human --invite 'generative://pair?...' --state /tmp/client.json
   python3 testclient/client.py demo --state /tmp/client.json --session test-1 --text hello --delay-ms 350
 """
@@ -581,7 +581,7 @@ def main() -> None:
             invite, channel = handshake_http(args.url, args.password, allow_insecure=args.insecure_http)
         elif args.method == "ssh":
             if args.ssh_target:
-                cmd = f"ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes {shlex.quote(args.ssh_target)} serverside handshake --stdio"
+                cmd = f"ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes {shlex.quote(args.ssh_target)} generative handshake --stdio"
             else:
                 cmd = args.ssh_command or ""
             invite = handshake_ssh(cmd)
