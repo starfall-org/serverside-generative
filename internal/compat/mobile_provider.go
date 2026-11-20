@@ -180,7 +180,33 @@ func (p MobileProvider) StoredMetadataJSON() ([]byte, error) {
 	var safeKeys any
 	var safeAccounts any
 	var multipleKeys any
+	// Numeric token budgets are model limits, not authentication tokens.
+	// Remove only these exact, typed fields from the generic credential scan.
+	var maxTokens any
+	modelLimits := map[string]any{}
 	if config, ok := obj["config"].(map[string]any); ok {
+		if value, exists := config["maxTokens"]; exists {
+			if _, ok := value.(json.Number); !ok {
+				return nil, ErrMobileProvider
+			}
+			maxTokens = value
+			delete(config, "maxTokens")
+		}
+		if models, ok := config["modelConfigs"].(map[string]any); ok {
+			for id, entry := range models {
+				model, ok := entry.(map[string]any)
+				if !ok {
+					return nil, ErrMobileProvider
+				}
+				if value, exists := model["contextWindowTokens"]; exists {
+					if _, ok := value.(json.Number); !ok {
+						return nil, ErrMobileProvider
+					}
+					modelLimits[id] = value
+					delete(model, "contextWindowTokens")
+				}
+			}
+		}
 		multipleKeys = config["multipleApiKeys"]
 		delete(config, "multipleApiKeys") // Boolean switch, not an API key.
 		if keys, ok := config["apiKeys"].([]any); ok {
@@ -229,6 +255,14 @@ func (p MobileProvider) StoredMetadataJSON() ([]byte, error) {
 	}
 	obj["auth"] = auth
 	if config, ok := obj["config"].(map[string]any); ok {
+		if maxTokens != nil {
+			config["maxTokens"] = maxTokens
+		}
+		if models, ok := config["modelConfigs"].(map[string]any); ok {
+			for id, value := range modelLimits {
+				models[id].(map[string]any)["contextWindowTokens"] = value
+			}
+		}
 		if multipleKeys != nil {
 			config["multipleApiKeys"] = multipleKeys
 		}

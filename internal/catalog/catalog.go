@@ -68,6 +68,9 @@ func (s *Store) load() (Bundle, error) {
 	b := Bundle{Manifest: m, Files: map[string]string{}}
 	for _, name := range files {
 		raw, err := read(filepath.Join(s.dir, name), maxFile)
+		if errors.Is(err, os.ErrNotExist) {
+			return Bundle{}, ErrInvalid
+		}
 		if err != nil {
 			return Bundle{}, err
 		}
@@ -96,6 +99,31 @@ func (s *Store) Get() (Bundle, error) {
 		return Bundle{}, err
 	}
 	return s.load()
+}
+
+// Ensure initializes a truly empty catalog and recovers committed transactions.
+// An incomplete or corrupted catalog must not be replaced by empty defaults.
+func (s *Store) Ensure() (Bundle, error) {
+	current, err := s.Get()
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		return current, err
+	}
+	existing, err := s.PreviewInventory()
+	if err != nil {
+		return Bundle{}, err
+	}
+	if existing.Files != nil {
+		return existing, nil
+	}
+	docs, err := Empty()
+	if err != nil {
+		return Bundle{}, err
+	}
+	current, err = s.Save(0, docs)
+	if errors.Is(err, ErrConflict) {
+		return s.Get()
+	}
+	return current, err
 }
 
 // Save uses a recoverable, fsynced transaction directory and publishes the
@@ -592,9 +620,21 @@ func validateMobileCatalogMetadata(docs map[string]string) error {
 
 // Preview reads a committed catalog without attempting crash recovery or writes.
 func (s *Store) Preview() (Bundle, error) {
+	return s.preview(false)
+}
+
+// PreviewInventory returns a zero bundle for a catalog that has never been initialized.
+func (s *Store) PreviewInventory() (Bundle, error) {
+	return s.preview(true)
+}
+
+func (s *Store) preview(allowEmpty bool) (Bundle, error) {
 	gate.Lock()
 	defer gate.Unlock()
 	if err := s.checkDir(false); err != nil {
+		if allowEmpty && errors.Is(err, os.ErrNotExist) {
+			return Bundle{}, nil
+		}
 		return Bundle{}, err
 	}
 	unlock, err := lockDirectory(s.dir, false)
@@ -607,7 +647,19 @@ func (s *Store) Preview() (Bundle, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Bundle{}, err
 	}
-	return s.load()
+	bundle, err := s.load()
+	if !allowEmpty || !errors.Is(err, os.ErrNotExist) {
+		return bundle, err
+	}
+	// A published manifest or a document without its manifest is an incomplete catalog.
+	for _, name := range append([]string{"catalog-manifest.json"}, files...) {
+		if _, err := os.Lstat(filepath.Join(s.dir, name)); err == nil {
+			return Bundle{}, ErrInvalid
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return Bundle{}, err
+		}
+	}
+	return Bundle{}, nil
 }
 
 func (s *Store) checkDir(create bool) error {

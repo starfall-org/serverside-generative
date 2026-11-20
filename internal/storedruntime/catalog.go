@@ -42,9 +42,13 @@ func ReadCatalog(dir string) (Catalog, error) { return ReadCatalogValidated(dir,
 
 // ReadCatalogValidated can check the resolved runtime using the same chat adapter rules.
 func ReadCatalogValidated(dir string, validate func(json.RawMessage) error) (Catalog, error) {
-	b, err := catalog.New(dir).Preview()
+	b, err := catalog.New(dir).PreviewInventory()
 	if err != nil {
 		return Catalog{}, err
+	}
+	out := Catalog{Version: 1, Revision: b.Manifest.Revision, Providers: []Provider{}}
+	if b.Files == nil {
+		return out, nil
 	}
 	var providers struct {
 		Providers []struct {
@@ -71,7 +75,6 @@ func ReadCatalogValidated(dir string, validate func(json.RawMessage) error) (Cat
 	if yaml.Unmarshal([]byte(b.Files["providers.yaml"]), &providers) != nil || yaml.Unmarshal([]byte(b.Files["models.yaml"]), &models) != nil {
 		return Catalog{}, ErrUnsupported
 	}
-	out := Catalog{Version: 1, Revision: b.Manifest.Revision, Providers: []Provider{}}
 	for _, p := range providers.Providers {
 		group, exists := models.Providers[p.ID]
 		entry := Provider{ID: p.ID, Name: p.Name, Type: p.Type, CustomModelID: exists && group.IDs == nil, KeySelectionRequired: p.Config.Multiple, Keys: []Key{}, Models: []Model{}}

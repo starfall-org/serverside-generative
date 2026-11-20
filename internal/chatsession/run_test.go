@@ -84,6 +84,14 @@ func TestRunTextPersistenceAndDedupe(t *testing.T) {
 	if err != nil || !strings.Contains(string(v.Conversation), "hello") || calls.Load() != 1 || v.Revision != 3 {
 		t.Fatalf("view=%s rev=%d calls=%d err=%v", v.Conversation, v.Revision, calls.Load(), err)
 	}
+	// Reopening must select the provider/model that actually generated the turn.
+	var savedModel struct {
+		ProviderID string `json:"provider_id"`
+		ModelID    string `json:"model_id"`
+	}
+	if err = json.Unmarshal(v.Conversation, &savedModel); err != nil || savedModel.ModelID != "test" {
+		t.Fatalf("model provenance missing from durable snapshot: %+v %v", savedModel, err)
+	}
 	entries, err := os.ReadDir(filepath.Join(dir, "chats"))
 	if err != nil {
 		t.Fatal(err)
@@ -204,6 +212,16 @@ func TestStoredRuntimePersistsChatButNotTransientCredentials(t *testing.T) {
 		t.Fatalf("expected private chats, backups and job leases directories: before=%d after=%d err=%v", len(before), len(after), err)
 	}
 	snap, err := chatstore.New(dir).Get("a", "c")
+	var selected struct {
+		ProviderID string `json:"provider_id"`
+		ModelID    string `json:"model_id"`
+	}
+	if err == nil {
+		err = json.Unmarshal(snap.Conversation, &selected)
+	}
+	if err != nil || selected.ProviderID != "p" || selected.ModelID != "test" {
+		t.Fatalf("stored provider/model selection not persisted: %+v %v", selected, err)
+	}
 	if err != nil || !strings.Contains(string(snap.Conversation), "ok") || strings.Contains(string(snap.Conversation), "stored-sentinel") || strings.Contains(string(snap.Conversation), "Instruction test") {
 		t.Fatalf("chat persistence or leaked credential: %+v %v", snap, err)
 	}

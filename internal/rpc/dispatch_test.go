@@ -224,3 +224,22 @@ func TestChunkedLargeSnapshotsDoNotEscapeWholeRPC(t *testing.T) {
 		t.Fatal(info)
 	}
 }
+
+func TestSessionOpenOptionalDataAndDeletedError(t *testing.T) {
+	d := New(chatsession.New(chatstore.New(filepath.Join(t.TempDir(), "data"))))
+	for i, raw := range []string{"", "null", `{"conversation":null,"runtime":null}`} {
+		id := []string{"one", "two", "three"}[i]
+		r := d.Dispatch("owner", Request{ID: "open", Op: "session.open", SessionID: id, Data: json.RawMessage(raw)})
+		if !r.OK {
+			t.Fatalf("open %q: %+v", raw, r.Error)
+		}
+		got := d.Dispatch("owner", Request{ID: "delete", Op: "session.delete", SessionID: id, Data: json.RawMessage(`{"expected_revision":1,"idempotency_key":"delete"}`)})
+		if !got.OK {
+			t.Fatalf("delete: %+v", got.Error)
+		}
+		got = d.Dispatch("owner", Request{ID: "reopen", Op: "session.open", SessionID: id})
+		if got.OK || got.Error == nil || got.Error.Code != "session_deleted" {
+			t.Fatalf("deleted: %+v", got)
+		}
+	}
+}

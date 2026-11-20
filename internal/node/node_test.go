@@ -14,7 +14,7 @@ import (
 
 func testNode(t *testing.T) *Node {
 	t.Helper()
-	n, err := New(Config{IdentityDir: t.TempDir(), Advertise: "127.0.0.1:7090", Password: "correct-password-long"})
+	n, err := New(Config{IdentityDir: t.TempDir(), DataDir: filepath.Join(t.TempDir(), "data"), Advertise: "127.0.0.1:7090", Password: "correct-password-long"})
 	if err != nil {
 		t.Fatal(err)
 	}

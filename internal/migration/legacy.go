@@ -87,7 +87,7 @@ func Migrate(identityDir, dataDir string, dryRun bool) (Report, error) {
 		return Report{}, err
 	}
 	for _, e := range entries {
-		if e.Name() != ".backups" {
+		if e.Name() != ".backups" && !(e.Name() == "identity" && e.IsDir() && filepath.Clean(identityDir) == filepath.Join(dataDir, "identity")) {
 			return Report{}, errors.New("data directory is not empty; migration requires a backup of existing data")
 		}
 	}

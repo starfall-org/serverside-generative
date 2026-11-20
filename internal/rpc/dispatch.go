@@ -36,6 +36,7 @@ type Dispatcher struct {
 	native          func(string, Request) Reply
 	capabilities    func() any
 	providerCatalog func() (any, error)
+	revokeIdentity  func(string) error
 }
 
 func New(s *chatsession.Manager) *Dispatcher                         { return &Dispatcher{sessions: s} }
@@ -43,6 +44,7 @@ func (d *Dispatcher) SetCatalog(c *catalog.Store)                    { d.catalog
 func (d *Dispatcher) SetNative(handler func(string, Request) Reply)  { d.native = handler }
 func (d *Dispatcher) SetProviderCatalog(handler func() (any, error)) { d.providerCatalog = handler }
 func (d *Dispatcher) SetCapabilities(handler func() any)             { d.capabilities = handler }
+func (d *Dispatcher) SetIdentityRevoker(handler func(string) error)  { d.revokeIdentity = handler }
 func failure(id, code, message string) Reply {
 	return Reply{ID: id, Error: &Error{Code: code, Message: message}}
 }
@@ -67,6 +69,18 @@ func (d *Dispatcher) Dispatch(owner string, r Request) Reply {
 			return failure(r.ID, "unsupported_feature", "Capabilities unavailable")
 		}
 		result = d.capabilities()
+	case "identity.revoke":
+		// Owner comes from authenticated transport, never from request data.
+		if len(r.Data) != 0 && string(r.Data) != "null" {
+			return failure(r.ID, "invalid_request", "Identity revocation takes no data")
+		}
+		if d.revokeIdentity == nil {
+			return failure(r.ID, "unsupported_feature", "Identity revocation unavailable")
+		}
+		err = d.revokeIdentity(owner)
+		if err == nil {
+			result = map[string]bool{"revoked": true}
+		}
 	case "provider.catalog":
 		if d.providerCatalog == nil {
 			return failure(r.ID, "unsupported_feature", "Catalog unavailable")
@@ -129,6 +143,20 @@ func (d *Dispatcher) Dispatch(owner string, r Request) Reply {
 			result = map[string]string{"request_id": in.RequestID}
 		}
 
+	case "provider.import", "mcp.import":
+		if d.catalog == nil {
+			return failure(r.ID, "unsupported_feature", "Catalog unavailable")
+		}
+		kind := strings.TrimSuffix(r.Op, ".import")
+		err = d.catalog.ImportMobile(kind, r.Data)
+		if err == nil {
+			result = map[string]bool{"imported": true}
+		}
+	case "mcp.catalog":
+		if d.catalog == nil {
+			return failure(r.ID, "unsupported_feature", "Catalog unavailable")
+		}
+		result, err = d.catalog.MCPInventory()
 	case "config.get":
 		if d.catalog == nil {
 			return failure(r.ID, "unsupported_feature", "Catalog unavailable")
@@ -159,8 +187,11 @@ func (d *Dispatcher) Dispatch(owner string, r Request) Reply {
 			Conversation json.RawMessage `json:"conversation"`
 			Runtime      json.RawMessage `json:"runtime"`
 		}
-		if !decode(r.Data, &in) {
+		if len(r.Data) > 0 && !decode(r.Data, &in) {
 			return failure(r.ID, "invalid_request", "Invalid session data")
+		}
+		if string(in.Conversation) == "null" {
+			in.Conversation = nil
 		}
 		if string(in.Runtime) == "null" {
 			in.Runtime = nil
@@ -377,7 +408,7 @@ func (d *Dispatcher) Dispatch(owner string, r Request) Reply {
 			return failure(r.ID, "missing_runtime_config", "Runtime configuration required")
 		case errors.Is(err, chatsession.ErrProvider):
 			return failure(r.ID, "unsupported_provider_adapter", "Provider adapter is not implemented")
-		case errors.Is(err, chatsession.ErrUnsupported):
+		case errors.Is(err, chatsession.ErrUnsupported), errors.Is(err, catalog.ErrImportUnsupported):
 			return failure(r.ID, "unsupported_feature", "Runtime feature is not supported")
 		case errors.Is(err, chatsession.ErrReplay):
 			return failure(r.ID, "request_already_recorded", "Request already recorded; inspect session")
@@ -387,7 +418,7 @@ func (d *Dispatcher) Dispatch(owner string, r Request) Reply {
 			return failure(r.ID, "event_gap", "Event history is no longer available")
 		case errors.Is(err, chatsession.ErrNotFound):
 			return failure(r.ID, "not_found", "Session not found")
-		case errors.Is(err, chatstore.ErrDeleted):
+		case errors.Is(err, chatstore.ErrDeleted), errors.Is(err, chatsession.ErrMode):
 			return failure(r.ID, "session_deleted", "Session was deleted")
 		case errors.Is(err, chatstore.ErrConflict), errors.Is(err, catalog.ErrConflict):
 			return failure(r.ID, "revision_conflict", "Session changed")

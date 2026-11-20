@@ -25,8 +25,8 @@ The server needs a reachable SSH service for SSH pairing or fallback; it does **
 
 ### Persistence and features
 
-- `~/.config/serverside-generative/`: TLS certificate/key, per-client secret hashes, Unix `control.sock` and daemon `run/data.sock` (private filesystem permissions).
-- `~/.config/serverside/` (or `XDG_CONFIG_HOME/serverside/`): revisioned nonsecret `providers.yaml`, `models.yaml`, `mcp.yaml`, `profiles.yaml`; encrypted secret/custom-tool SQLite; **`chats/*.json` for every v5 conversation**. Existing `shared-config.json` remains available for old clients until explicitly migrated.
+- `~/.config/generative/identity/`: TLS certificate/key, per-client secret hashes, Unix `control.sock` and daemon `run/data.sock` (private filesystem permissions).
+- `~/.config/generative/` (or `XDG_CONFIG_HOME/generative/`): revisioned nonsecret `providers.yaml`, `models.yaml`, `mcp.yaml`, `profiles.yaml`; encrypted secret/custom-tool SQLite; **`chats/*.json` for every v5 conversation**. Existing `shared-config.json` remains available for old clients until explicitly migrated.
 - OAuth login/refresh, image/video/music binary generation/file storage, and other unsupported adapters are not silently implemented. Unsupported operations return explicit errors.
 - Terminal and coding-agent RPC operations are **opt-in** via `--enable-terminal` / `--enable-agent`; authorization is independent from ordinary model tools.
 - Metadata edits use a shared validation/CAS path; `config import`, `config diff` and the terminal `manage` editor do not bypass YAML secret restrictions. API keys/custom HTTP tools use encrypted SQLite; live mobile runtime secrets must never enter stored YAML or permanently stored chat JSON.
@@ -70,8 +70,18 @@ generative service restart
 generative service uninstall
 ```
 
-The installer automatically installs and starts the service for the current user, without root privileges, when installing a release that includes the service commands. Additional installer arguments are passed to `serve`. To install only the binary without registering or starting the service, run `SERVERSIDE_INSTALL_SERVICE=0 sh install-generative.sh`.
-Existing installations using the old executable name should uninstall the old service with `serverside service uninstall` before installing the renamed CLI, then reuse the same serve flags. The service identifiers and data/identity paths are unchanged.
+On startup, the daemon initializes a fresh empty YAML catalog and encrypted database automatically; existing incomplete or corrupt catalogs are not overwritten. The installer automatically installs and starts the service for the current user, without root privileges, when installing a release that includes the service commands. Additional installer arguments are passed to `serve`. To install only the binary without registering or starting the service, run `SERVERSIDE_INSTALL_SERVICE=0 sh install-generative.sh`.
+Existing installations must migrate the two old directories before starting the new daemon. Record the current serve flags, stop any manually started daemon, and uninstall the old managed service using the old executable. Back up the old directories before relocation (do not run this while the daemon or any CLI writer is running):
+
+```sh
+serverside service uninstall
+# Install the new binary without registering the new service first.
+SERVERSIDE_INSTALL_SERVICE=0 sh install-generative.sh
+generative config relocate
+generative service install -- # append your previous serve flags here
+```
+
+`config relocate` moves `$XDG_CONFIG_HOME/serverside` to `generative` and `serverside-generative` to `generative/identity` (default base: `~/.config`). It preserves chat files, encrypted databases and TLS/client identities, and refuses existing destinations or old service/socket paths. If a stale socket remains, confirm the daemon is stopped before removing that socket. No automatic overwrite or merge is performed. Explicit custom `--data-dir` / `--identity-dir` paths are not relocated. System service names remain unchanged.
 
 Flags after `--` are passed to `serve`. Stop a manually launched daemon before
 installing the service. Uninstalling the service does not remove chat or pairing

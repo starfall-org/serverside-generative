@@ -27,6 +27,7 @@ import (
 	"github.com/starfall-org/serverside-generative/internal/catalog"
 	"github.com/starfall-org/serverside-generative/internal/chatsession"
 	"github.com/starfall-org/serverside-generative/internal/chatstore"
+	"github.com/starfall-org/serverside-generative/internal/configdir"
 	"github.com/starfall-org/serverside-generative/internal/rpc"
 	"github.com/starfall-org/serverside-generative/internal/storedruntime"
 	"github.com/starfall-org/serverside-generative/internal/terminal"
@@ -183,18 +184,18 @@ func New(c Config) (*Node, error) {
 		c.Advertise = c.TCPListen
 	}
 	if c.IdentityDir == "" {
-		base, err := os.UserConfigDir()
+		base, err := configdir.Root()
 		if err != nil {
 			return nil, err
 		}
-		c.IdentityDir = filepath.Join(base, "serverside-generative")
+		c.IdentityDir = filepath.Join(base, "identity")
 	}
 	if c.DataDir == "" {
-		base, err := os.UserConfigDir()
+		base, err := configdir.Root()
 		if err != nil {
 			return nil, err
 		}
-		c.DataDir = filepath.Join(base, "serverside")
+		c.DataDir = base
 	}
 	if c.IPCSocket == "" {
 		c.IPCSocket = filepath.Join(c.IdentityDir, "control.sock")
@@ -222,6 +223,7 @@ func New(c Config) (*Node, error) {
 		return storedruntime.ReadCatalogValidated(c.DataDir, chatsession.ValidateStoredRuntime)
 	})
 	n.rpc.SetNative(n.nativeRPC)
+	n.rpc.SetIdentityRevoker(n.revokePair)
 	n.rpc.SetCapabilities(func() any { return n.capabilities() })
 	n.nativeReceipts = make(map[string]*nativeReceipt)
 	n.tokens = make(map[[32]byte]apiToken)

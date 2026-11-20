@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/starfall-org/serverside-generative/internal/configdir"
 	"io"
 	"net"
 	"os"
@@ -39,8 +40,8 @@ type status struct {
 }
 
 func dirPath() (string, error) {
-	base, err := os.UserConfigDir()
-	return filepath.Join(base, "serverside-generative", "service"), err
+	base, err := configdir.Root()
+	return filepath.Join(base, "identity", "service"), err
 }
 func configPath(dir string) string { return filepath.Join(dir, "config.json") }
 func logPath(dir string) string    { return filepath.Join(dir, "daemon.log") }

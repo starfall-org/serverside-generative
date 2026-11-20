@@ -126,3 +126,42 @@ func TestV5HTTPRevocationOnlyOwnIdentityAndInvalidatesBearer(t *testing.T) {
 		t.Fatalf("other bearer invalidated: %d", response.StatusCode)
 	}
 }
+
+// The framed SSH/TCP RPC revokes the authenticated owner, not a caller-supplied target.
+func TestV5FramedRPCIdentityRevocation(t *testing.T) {
+	n, err := New(Config{IdentityDir: t.TempDir(), DataDir: filepath.Join(t.TempDir(), "data")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.Close()
+	pairingA, err := n.pairTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairingB, err := n.pairTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	idA, secretA := pairingA["client_id"].(string), pairingA["secret"].(string)
+	idB, secretB := pairingB["client_id"].(string), pairingB["secret"].(string)
+	r := rpc.Request{ID: "revoke", Op: "identity.revoke", Data: json.RawMessage(`{"client_id":"` + idB + `"}`)}
+	if reply := n.rpc.Dispatch(idA, r); reply.Error == nil || reply.Error.Code != "invalid_request" {
+		t.Fatalf("accepted owner override: %+v", reply)
+	}
+	if !n.verifyPairFor(idA, secretA, "tcp") || !n.verifyPairFor(idB, secretB, "tcp") {
+		t.Fatal("invalid attempt modified pairings")
+	}
+	r.Data = nil
+	if reply := n.rpc.Dispatch("", r); reply.Error == nil || reply.Error.Code != "unauthorized" {
+		t.Fatalf("anonymous revocation accepted: %+v", reply)
+	}
+	if reply := n.rpc.Dispatch(idA, r); !reply.OK || reply.Data.(map[string]bool)["revoked"] != true {
+		t.Fatalf("self-revocation was not confirmed: %+v", reply)
+	}
+	if n.verifyPairFor(idA, secretA, "tcp") || !n.verifyPairFor(idB, secretB, "tcp") {
+		t.Fatal("revocation violated identity isolation")
+	}
+	if reply := n.rpc.Dispatch(idA, r); reply.OK {
+		t.Fatalf("revoke replay accepted: %+v", reply)
+	}
+}

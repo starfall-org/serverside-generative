@@ -89,3 +89,33 @@ Android keeps an identity-scoped encrypted, evictable local mirror to avoid
 transferring unchanged remote history; older servers can still return full
 snapshots without violating the client contract. This does not share chats
 across paired identities and does not make Android's Room local chat authoritative.
+
+## P10 — SSH-stdio paired client self-revocation (connection lifecycle)
+
+**Implemented; live-device verification outstanding (2026-11-18).** The v5 `identity.revoke` RPC accepts no request `data` and acts only on the owner authenticated by the TCP/SSH-stdio frame. It returns `{"revoked":true}` only after successful server revocation. Existing durable conversations remain stored; other paired identities are unaffected. This is separate from HTTP's `POST /v1/revoke`; the legacy `type:"revoke"` frame is not used. Android calls the v5 RPC and removes local credentials only after confirmation. Do **not** replay an ambiguous revocation. Go authorization/isolation tests and Android in-memory framed I/O tests pass; real SSH server/device and connection-interruption validation are still pending. Older deployed server binaries without this RPC require upgrade before SSH self-revocation works.
+
+## P11 — Local catalog import parity
+
+**Partially implemented:** authenticated `provider.import`, `mcp.import` and
+`mcp.catalog` now persist selected compatible mobile records using the existing
+catalog and encrypted credential storage. Model IDs, model configuration,
+multiple API keys, MCP headers and query authentication are preserved for
+supported records. Existing IDs are not overwritten. Android discovers these
+operations via capabilities.
+
+**Outstanding:** migrating OAuth adapter token stores and supporting imported
+provider-specific private headers, proxy settings and private provider URLs
+requires additional server runtime support. Unsupported records fail closed.
+Live-device testing and deployment remain outstanding. OpenCode provider
+import has no verified public write API; its MCP add API is runtime-only.
+
+## P12 — SSH RPC reply starvation and misleading open errors
+
+The SSH stdio client polls `session.events` using an explicit cursor. Previously
+the daemon also pushed events automatically onto the same framed pipe, causing
+an unnecessary duplicate stream and potentially blocking RPC replies under
+large event backlogs. SSH stdio now defaults to polling; an explicit `after` on
+open opts into push. TCP/WS also subscribe on chunked open. Data-free opens
+accept omitted/null payloads, and deleted-session opens return `session_deleted`
+instead of an opaque internal error. Regression tests cover the polling wire,
+deleted chat and optional open data. Live-device verification remains pending.

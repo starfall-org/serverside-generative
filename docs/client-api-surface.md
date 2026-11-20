@@ -65,6 +65,8 @@ The server displays `https://host/connect#code=...&pin=sha256%2F...&v=1` as full
 
 **TCP is enrolled only via authenticated SSH**, e.g. `ssh -T USER@HOST generative pair --stdio --transport tcp`. The resulting identity can use TCP or the SSH stdio fallback, but not HTTP/WS without explicit separate pairing. An HTTP/WS URL-paired identity cannot be used to enroll a TCP client.
 
+SSH stdio defaults to cursor polling with `session.events` and never injects unsolicited events when `session.open` omits `after`. To request push delivery over SSH, explicitly supply an `after` cursor in `session.open` or `session.open_chunked`. TCP and WebSocket continue to support push on both open operations.
+
 ## 4. Canonical RPC and automatic conversation delivery
 
 A client does **not** send a sync or storage flag. The Go server always persists chat history; `runtime` carries transient provider/MCP settings only when needed.
@@ -110,6 +112,8 @@ clients must then use chunked reads. No cached history is uploaded to the server
 by this operation. Clients must never treat `unchanged` as proof of ownership
 without a successful authenticated response.
 
+The capabilities negotiation reports `chat_features.negotiation.generation.max_run_content_bytes` (64 KiB for current text prompts) separately from `max_message_bytes` (512 KiB limit for a stored history message). Clients should use the former to validate new runs.
+
 The `event_seq` on `session.open` and `session.get` is the current live
 session event sequence at the instant the snapshot was captured. Clients must
 subscribe to `/v1/events?after=event_seq` **before or after** sending a new
@@ -136,6 +140,7 @@ The event's `conversation.messages` is illustrative here. In reality it contains
 | `session.get` | Full server conversation + `revision`; accepts `if_revision` and may return `unchanged` |
 | `session.events` | Events after the requested `after` sequence |
 | `session.save` | Explicit full chat edit; `expected_revision` and `idempotency_key` for atomic CAS |
+| `identity.revoke` | Authenticated, self-only v5 RPC revocation for TCP/SSH-stdio pairing. Send no `data`; success returns `{ "revoked": true }`. Revocation ends future access under this identity but retains server history. Do not replay after an uncertain response. |
 | `session.list` | Stored owner-scoped chats and tombstones (persistent across restart) |
 | `session.close` | Release RAM runtime only, **not** history |
 | `session.delete` | Explicit durable chat deletion with tombstone and revision check |
@@ -283,3 +288,23 @@ sequenceDiagram
 ## 6. Integration restrictions
 
 The server tests cover durable conversations, bounded chunk transfer, provider/MCP credential isolation and transport semantics. End-to-end device, corrupted-data and adversarial failover coverage remains incomplete.
+
+### Importing a selected mobile provider or MCP server
+
+Authenticated v5 clients may call `provider.import` or `mcp.import` with the
+selected mobile ModelProvider or McpInfo JSON object as RPC data. Check
+`capabilities.get.operations` for support first. Success is
+`{"imported":true}`. The server stages credentials in its existing encrypted
+secret store and publishes the corresponding catalog record with revision CAS;
+it does not replace an existing ID. The provider's model IDs and model
+configuration are written to the model catalog; device-local folder membership
+is not transferred. The client should refresh the inventory after import.
+`mcp.catalog` returns a list of nonsecret objects with `id`, `name` and
+`protocol`. Neither import responses nor MCP inventory contain credentials.
+MCP extra HTTP headers and URL query strings use an encrypted connection
+reference; bearer, custom-header and query-parameter authentication are resolved
+from encrypted references. OAuth account/token migration and provider-specific
+private headers/proxies are not supported by this import contract and fail
+closed rather than silently losing data. The existing server runtime adapter
+limitations still apply. Failed catalog CAS can leave unreferenced encrypted
+credentials, as with existing CLI credential updates.

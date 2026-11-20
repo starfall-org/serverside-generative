@@ -133,3 +133,25 @@ func TestMediaProfileEditingPreservesOpaqueFields(t *testing.T) {
 		t.Fatalf("profile: %s %v", b.Files["profiles.yaml"], err)
 	}
 }
+
+func TestEnsureInitializesAndPreservesCatalog(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	store := New(dir)
+	first, err := store.Ensure()
+	if err != nil || first.Manifest.Revision != 1 || len(first.Files) != 4 {
+		t.Fatalf("initialize: %+v %v", first.Manifest, err)
+	}
+	second, err := store.Ensure()
+	if err != nil || second.Manifest.Revision != first.Manifest.Revision {
+		t.Fatalf("repeat: %+v %v", second.Manifest, err)
+	}
+	if err := os.Remove(filepath.Join(dir, "models.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Ensure(); err == nil {
+		t.Fatal("silently reset incomplete catalog")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "models.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("missing document overwritten: %v", err)
+	}
+}

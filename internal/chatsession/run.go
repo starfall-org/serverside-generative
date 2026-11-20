@@ -247,6 +247,10 @@ func (m *Manager) Run(owner, id, requestID, content string) error {
 	}
 	msgs = append(msgs, makeMsg(userID, "user", content, false), makeMsg(modelID, "model", "", true))
 	doc["messages"], _ = json.Marshal(msgs)
+	// Persist the actual model used so another client reopening this chat will not
+	// accidentally continue it with a different catalogue default.
+	doc["provider_id"], _ = json.Marshal(state.Provider.ID)
+	doc["model_id"], _ = json.Marshal(state.Provider.Model)
 	doc["updated_at"], _ = json.Marshal(now.UnixMilli())
 	initial, err := json.Marshal(doc)
 	if err != nil {

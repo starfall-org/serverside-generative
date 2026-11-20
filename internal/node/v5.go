@@ -91,7 +91,7 @@ func secureDataRequest(r *http.Request) bool {
 	host, _, err := net.SplitHostPort(addr.String())
 	return err == nil && net.ParseIP(host).IsLoopback()
 }
-func (n *Node) serveRPCPeer(p *peer) {
+func (n *Node) serveRPCPeer(p *peer, pollDefault bool) {
 	subs := map[string]func(){}
 	defer func() {
 		for _, cancel := range subs {
@@ -109,7 +109,7 @@ func (n *Node) serveRPCPeer(p *peer) {
 			continue
 		}
 		reply := n.rpc.Dispatch(p.clientID, req)
-		if reply.OK && req.Op == "session.open" && subs[req.SessionID] == nil {
+		if reply.OK && opensSession(req) && (!pollDefault || hasEventCursor(req)) && subs[req.SessionID] == nil {
 			ch, cancel, err := n.rpc.Subscribe(p.clientID, req.SessionID)
 			if err == nil {
 				subs[req.SessionID] = cancel
@@ -153,6 +153,15 @@ func eventFailure(err error) (int, string, string) {
 	}
 }
 
+func opensSession(req rpc.Request) bool {
+	return req.Op == "session.open" || req.Op == "session.open_chunked"
+}
+func hasEventCursor(req rpc.Request) bool {
+	var data struct {
+		After *uint64 `json:"after"`
+	}
+	return json.Unmarshal(req.Data, &data) == nil && data.After != nil
+}
 func openCursor(req rpc.Request) uint64 {
 	var data struct {
 		After uint64 `json:"after"`
@@ -195,7 +204,7 @@ func rpcHTTPError(w http.ResponseWriter, status int, code, message string) {
 	jsonReply(w, status, rpc.Reply{ID: "", Error: &rpc.Error{Code: code, Message: message}})
 }
 func (n *Node) capabilities() map[string]any {
-	operations := []string{"capabilities.get", "provider.catalog", "tool.list", "tool.call", "config.get", "config.save", "session.open", "session.open_chunked", "session.read_chunk", "session.upload.begin", "session.upload.chunk", "session.upload.commit", "session.upload.abort", "session.configure", "session.get", "session.save", "session.run", "session.cancel", "session.list", "session.delete", "session.events", "session.close"}
+	operations := []string{"identity.revoke", "capabilities.get", "provider.catalog", "provider.import", "mcp.catalog", "mcp.import", "tool.list", "tool.call", "config.get", "config.save", "session.open", "session.open_chunked", "session.read_chunk", "session.upload.begin", "session.upload.chunk", "session.upload.commit", "session.upload.abort", "session.configure", "session.get", "session.save", "session.run", "session.cancel", "session.list", "session.delete", "session.events", "session.close"}
 	if n.Terminals != nil {
 		operations = append(operations, "terminal.create", "terminal.execute", "terminal.read", "terminal.close", "terminal.list")
 	}
@@ -218,12 +227,12 @@ func (n *Node) capabilities() map[string]any {
 			"text_generation":          true, "streaming": true, "conversation_summary": true,
 			"attachments": false, "multimodal_input": false, "generation_tool_loop": false,
 			"reasoning_history": false, "selected_instructions": false, "runtime_instruction_handoff": true,
-			"conversation_max_bytes": 3 << 20, "workspace_scope": "paired_client",
+			"conversation_max_bytes": 3 << 20, "workspace_scope": "paired_client", "ssh_event_delivery": "poll_default_explicit_after_push",
 			"negotiation": map[string]any{
 				"version": 1, "catalog_operation": "provider.catalog", "catalog_requires_authentication": true,
 				"modalities": map[string]any{"input": []string{"text"}, "output": []string{"text"}, "attachment_upload": false},
 				"history":    map[string]any{"summary": true, "reasoning": false, "tool_activity": false, "selected_instructions": "explicit_runtime_text"},
-				"generation": map[string]any{"streaming": true, "cancellation": true, "tool_loop": false, "max_history_messages": 256, "max_message_bytes": 512 << 10},
+				"generation": map[string]any{"streaming": true, "cancellation": true, "tool_loop": false, "max_history_messages": 256, "max_message_bytes": 512 << 10, "max_run_content_bytes": 64 << 10},
 				"parameters": map[string]any{
 					"max_tokens":  map[string]any{"min": 0, "max": 131072, "provider_limit": "unknown"},
 					"temperature": map[string]any{"min": 0, "max": 2}, "top_p": map[string]any{"min": 0, "max": 1}, "top_k": map[string]any{"min": 1, "max": 1000},
@@ -574,7 +583,7 @@ func (n *Node) registerV5(mux *http.ServeMux) {
 				continue
 			}
 			reply := n.rpc.Dispatch(id, req)
-			if reply.OK && req.Op == "session.open" && subs[req.SessionID] == nil {
+			if reply.OK && opensSession(req) && subs[req.SessionID] == nil {
 				ch, cancel, err := n.rpc.Subscribe(id, req.SessionID)
 				if err == nil {
 					subs[req.SessionID] = cancel

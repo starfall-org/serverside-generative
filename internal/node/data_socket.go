@@ -143,7 +143,7 @@ func (n *Node) handleLocalV5(conn net.Conn) {
 		response["secret"] = secret
 	}
 	if p.send(response) == nil {
-		n.serveRPCPeer(p)
+		n.serveRPCPeer(p, true)
 	}
 }
 

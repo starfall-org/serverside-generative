@@ -30,13 +30,15 @@ func ResolveMCP(dir string, runtime, conversation json.RawMessage, serverID stri
 	}
 	var servers struct {
 		Servers []struct {
-			ID       string `yaml:"id"`
-			Protocol string `yaml:"protocol"`
-			URL      string `yaml:"url"`
-			Auth     struct {
-				Method string `yaml:"method"`
-				Header string `yaml:"header_name"`
-				Ref    string `yaml:"credential_ref"`
+			ID            string `yaml:"id"`
+			Protocol      string `yaml:"protocol"`
+			URL           string `yaml:"url"`
+			ConnectionRef string `yaml:"connection_ref"`
+			Auth          struct {
+				Method    string `yaml:"method"`
+				Header    string `yaml:"header_name"`
+				Parameter string `yaml:"parameter_name"`
+				Ref       string `yaml:"credential_ref"`
 			} `yaml:"auth"`
 		} `yaml:"servers"`
 	}
@@ -54,28 +56,52 @@ func ResolveMCP(dir string, runtime, conversation json.RawMessage, serverID stri
 		auth := map[string]any{"method": s.Auth.Method}
 		switch s.Auth.Method {
 		case "", "NONE":
-		case "BEARER_TOKEN", "CUSTOM_HEADER":
-			prefix := "mcp/" + serverID + "/"
-			if !strings.HasPrefix(s.Auth.Ref, prefix) || len(s.Auth.Ref) == len(prefix) {
-				return nil, ErrAuth
-			}
-			store, e := secrets.OpenReadOnly(dir)
+		case "BEARER_TOKEN", "CUSTOM_HEADER", "QUERY_PARAM":
+			value, e := storedMCPCredential(dir, serverID, s.Auth.Ref)
 			if e != nil {
-				return nil, ErrAuth
-			}
-			value, e := store.Get("mcp", serverID, strings.TrimPrefix(s.Auth.Ref, prefix))
-			closeErr := store.Close()
-			if e != nil || closeErr != nil || len(value) == 0 {
-				return nil, ErrAuth
+				return nil, e
 			}
 			auth["value"] = string(value)
 			if s.Auth.Method == "CUSTOM_HEADER" {
 				auth["key"] = s.Auth.Header
+			} else if s.Auth.Method == "QUERY_PARAM" {
+				auth["key"] = s.Auth.Parameter
 			}
 		default:
 			return nil, ErrUnsupported
 		}
 		entry = map[string]any{"id": s.ID, "protocol": s.Protocol, "url": s.URL, "auth": auth}
+		if s.ConnectionRef != "" {
+			value, err := storedMCPCredential(dir, serverID, s.ConnectionRef)
+			if err != nil {
+				return nil, err
+			}
+			var private struct {
+				URL     string            `json:"url"`
+				Headers map[string]string `json:"headers"`
+			}
+			if json.Unmarshal(value, &private) != nil {
+				return nil, ErrAuth
+			}
+			if private.URL != "" {
+				entry["url"] = private.URL
+			}
+			if len(private.Headers) != 0 {
+				header := s.Auth.Header
+				if s.Auth.Method == "BEARER_TOKEN" {
+					header = "Authorization"
+				}
+				if s.Auth.Method == "BEARER_TOKEN" || s.Auth.Method == "CUSTOM_HEADER" {
+					for key := range private.Headers {
+						if strings.EqualFold(key, header) {
+							delete(private.Headers, key)
+						}
+					}
+				}
+				entry["headers"] = private.Headers
+			}
+		}
+
 	}
 	if entry == nil {
 		return nil, ErrNotFound
@@ -108,4 +134,21 @@ func ResolveMCP(dir string, runtime, conversation json.RawMessage, serverID stri
 		}
 	}
 	return json.Marshal(result)
+}
+
+func storedMCPCredential(dir, serverID, ref string) ([]byte, error) {
+	prefix := "mcp/" + serverID + "/"
+	if !strings.HasPrefix(ref, prefix) || len(ref) == len(prefix) {
+		return nil, ErrAuth
+	}
+	store, err := secrets.OpenReadOnly(dir)
+	if err != nil {
+		return nil, ErrAuth
+	}
+	value, err := store.Get("mcp", serverID, strings.TrimPrefix(ref, prefix))
+	closeErr := store.Close()
+	if err != nil || closeErr != nil || len(value) == 0 {
+		return nil, ErrAuth
+	}
+	return value, nil
 }

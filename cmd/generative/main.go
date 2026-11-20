@@ -23,6 +23,7 @@ import (
 	"github.com/starfall-org/serverside-generative/internal/catalog"
 	"github.com/starfall-org/serverside-generative/internal/chatsession"
 	"github.com/starfall-org/serverside-generative/internal/chatstore"
+	"github.com/starfall-org/serverside-generative/internal/configdir"
 	"github.com/starfall-org/serverside-generative/internal/httptool"
 	"github.com/starfall-org/serverside-generative/internal/migration"
 	"github.com/starfall-org/serverside-generative/internal/node"
@@ -45,17 +46,13 @@ func usage() {
 }
 func defaultIPC() string {
 	dir, _ := os.UserConfigDir()
-	return filepath.Join(dir, "serverside-generative", "control.sock")
+	return filepath.Join(dir, configdir.Name, "identity", "control.sock")
 }
 func dataDirectory(path string) (string, error) {
 	if path != "" {
 		return path, nil
 	}
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "serverside"), nil
+	return configdir.Root()
 }
 func editCatalog(dir, revision string, dry bool, edit func(map[string]*yaml.Node) error) error {
 	if revision == "" {
@@ -79,7 +76,7 @@ func editCatalog(dir, revision string, dry bool, edit func(map[string]*yaml.Node
 
 func defaultDataSocket() string {
 	dir, _ := os.UserConfigDir()
-	return filepath.Join(dir, "serverside-generative", "run", "data.sock")
+	return filepath.Join(dir, configdir.Name, "identity", "run", "data.sock")
 }
 
 // bridgeStream copies binary frames without writing diagnostics to stdout.
@@ -140,6 +137,11 @@ func run(args []string) error {
 		if !*stdio || fs.NArg() != 0 {
 			return fmt.Errorf("use stream --stdio")
 		}
+		if *path == defaultDataSocket() {
+			if _, err := configdir.Root(); err != nil {
+				return err
+			}
+		}
 		return bridgeStream(*path, os.Stdin, os.Stdout)
 	case "manage":
 		return runManage(args[1:], os.Stdin, os.Stdout)
@@ -196,6 +198,11 @@ func run(args []string) error {
 		}
 		if args[0] == "handshake" && !*stdio {
 			return fmt.Errorf("use handshake --stdio over SSH")
+		}
+		if *ipc == defaultIPC() {
+			if _, err := configdir.Root(); err != nil {
+				return err
+			}
 		}
 		raw, err := node.ControlRequestFields(*ipc, map[string]string{"method": method, "endpoint": *endpoint, "pin": *pin})
 		if err != nil {
@@ -461,6 +468,13 @@ func run(args []string) error {
 		return nil
 
 	case "config":
+		if len(args) == 2 && args[1] == "relocate" {
+			if err := configdir.Relocate(); err != nil {
+				return err
+			}
+			fmt.Println("Configuration layout is up to date")
+			return nil
+		}
 		if len(args) > 1 && (args[1] == "export" || args[1] == "import" || args[1] == "diff") {
 			return runCatalogFileCommand(args[1:])
 		}
@@ -471,7 +485,7 @@ func run(args []string) error {
 			if err := fs.Parse(args[2:]); err != nil {
 				return err
 			}
-			docs, err := catalog.Empty()
+			_, err := catalog.Empty()
 			if err != nil {
 				return err
 			}
@@ -483,7 +497,7 @@ func run(args []string) error {
 			if err != nil {
 				return err
 			}
-			b, err := catalog.New(path).Save(0, docs)
+			b, err := catalog.New(path).Ensure()
 			if err != nil {
 				return err
 			}
@@ -499,11 +513,11 @@ func run(args []string) error {
 				return err
 			}
 			if *identity == "" {
-				base, err := os.UserConfigDir()
+				base, err := configdir.Root()
 				if err != nil {
 					return err
 				}
-				*identity = filepath.Join(base, "serverside-generative")
+				*identity = filepath.Join(base, "identity")
 			}
 			target, err := dataDirectory(*dir)
 			if err != nil {
@@ -517,7 +531,7 @@ func run(args []string) error {
 			return nil
 		}
 		if len(args) < 2 || args[1] != "validate" {
-			return fmt.Errorf("use config init, config validate or config migrate")
+			return fmt.Errorf("use config init, config validate, config migrate or config relocate")
 		}
 		fs := flag.NewFlagSet("config validate", flag.ContinueOnError)
 		dir := fs.String("data-dir", "", "catalog data directory")
@@ -898,6 +912,17 @@ func run(args []string) error {
 			return err
 		}
 		defer n.Close()
+		if _, err := catalog.New(n.Config.DataDir).Ensure(); err != nil {
+			return fmt.Errorf("initialize catalog in %s (restore missing/corrupt committed files): %w", n.Config.DataDir, err)
+		}
+		// Create the encrypted database/schema before serving requests.
+		secretStore, err := secrets.Open(n.Config.DataDir)
+		if err != nil {
+			return fmt.Errorf("initialize encrypted store: %w", err)
+		}
+		if err = secretStore.Close(); err != nil {
+			return err
+		}
 		sock := n.Config.IPCSocket
 		control, err := node.StartIPCSocket(sock)
 		if err != nil {

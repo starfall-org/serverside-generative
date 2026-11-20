@@ -109,7 +109,7 @@ func (n *Node) ServeTCP(ctx context.Context, listener net.Listener) {
 	for {
 		conn, err := tlsListener.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
 			}
 			log.Printf("tcp accept: %v", err)
@@ -166,7 +166,7 @@ func (n *Node) handleTCP(conn net.Conn) {
 		p.writeTimeout = 10 * time.Second
 		reply := map[string]any{"type": "paired", "client_id": id, "protocol": 5}
 		if p.send(reply) == nil {
-			n.serveRPCPeer(p)
+			n.serveRPCPeer(p, false)
 		}
 		return
 	}

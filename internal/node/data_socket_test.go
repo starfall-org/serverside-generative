@@ -112,6 +112,27 @@ func TestDataSocketPairAndRPC(t *testing.T) {
 	if err = frameRead(conn, &reply); err != nil || !reply.OK {
 		t.Fatalf("get: %+v %v", reply, err)
 	}
+	// Android SSH uses cursor polling. Mutations must not inject unsolicited
+	// event frames into its RPC reply stream.
+	save := rpc.Request{ID: "save", Op: "session.save", SessionID: "ssh", Data: json.RawMessage(`{"expected_revision":1,"idempotency_key":"edit","conversation":{"id":"ssh","title":"edited","created_at":1,"updated_at":2,"messages":[]}}`)}
+	if err = p.send(save); err != nil {
+		t.Fatal(err)
+	}
+	reply = rpc.Reply{}
+	if err = frameRead(conn, &reply); err != nil || !reply.OK || reply.ID != "save" {
+		t.Fatalf("save reply: %+v %v", reply, err)
+	}
+	if err = p.send(rpc.Request{ID: "poll", Op: "session.events", SessionID: "ssh", Data: json.RawMessage(`{"after":0}`)}); err != nil {
+		t.Fatal(err)
+	}
+	reply = rpc.Reply{}
+	if err = frameRead(conn, &reply); err != nil || !reply.OK || reply.ID != "poll" {
+		t.Fatalf("poll reply: %+v %v", reply, err)
+	}
+	events, ok := reply.Data.([]any)
+	if !ok || len(events) == 0 {
+		t.Fatalf("missing polled event: %+v", reply.Data)
+	}
 	cancel()
 	if err = frameRead(conn, &reply); err == nil {
 		t.Fatal("connection survived data socket shutdown")
