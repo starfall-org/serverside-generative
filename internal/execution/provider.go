@@ -141,18 +141,26 @@ func Unauthorized(err error) bool {
 }
 
 func Stream(ctx context.Context, state State, onDelta func(string)) error {
+	return StreamOutput(ctx, state, func(event OutputEvent) {
+		if event.Kind == OutputText {
+			onDelta(event.Text)
+		}
+	})
+}
+
+func StreamOutput(ctx context.Context, state State, emit func(OutputEvent)) error {
 	if err := state.ValidateModel(); err != nil {
 		return err
 	}
 	switch state.Provider.Platform {
 	case "openai-responses":
-		return streamOpenAIResponses(ctx, state, onDelta)
+		return streamOpenAIResponses(ctx, state, emit)
 	case "openai-chat":
-		return streamOpenAIChat(ctx, state, onDelta)
+		return streamOpenAIChat(ctx, state, emit)
 	case "anthropic":
-		return streamAnthropic(ctx, state, onDelta)
+		return streamAnthropic(ctx, state, emit)
 	case "gemini":
-		return streamGemini(ctx, state, onDelta)
+		return streamGemini(ctx, state, emit)
 	}
 	return errors.New("unsupported provider")
 }
@@ -170,7 +178,7 @@ func openAIOptions(s State) []openaioption.RequestOption {
 	return options
 }
 
-func streamOpenAIResponses(ctx context.Context, s State, emit func(string)) error {
+func streamOpenAIResponses(ctx context.Context, s State, emit func(OutputEvent)) error {
 	client := openai.NewClient(openAIOptions(s)...)
 	input := make(responses.ResponseInputParam, 0, len(s.Conversation))
 	for _, m := range s.Conversation {
@@ -193,9 +201,7 @@ func streamOpenAIResponses(ctx context.Context, s State, emit func(string)) erro
 	defer stream.Close()
 	for stream.Next() {
 		event := stream.Current()
-		if event.Type == "response.output_text.delta" && event.Delta != "" {
-			emit(event.Delta)
-		}
+		emitResponsesOutput(event, emit)
 		if event.Type == "response.failed" {
 			return errors.New("model response failed")
 		}
@@ -209,7 +215,7 @@ func streamOpenAIResponses(ctx context.Context, s State, emit func(string)) erro
 	return nil
 }
 
-func streamOpenAIChat(ctx context.Context, s State, emit func(string)) error {
+func streamOpenAIChat(ctx context.Context, s State, emit func(OutputEvent)) error {
 	client := openai.NewClient(openAIOptions(s)...)
 	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(s.Conversation))
 	for _, m := range s.Conversation {
@@ -238,9 +244,7 @@ func streamOpenAIChat(ctx context.Context, s State, emit func(string)) error {
 	defer stream.Close()
 	for stream.Next() {
 		for _, choice := range stream.Current().Choices {
-			if choice.Delta.Content != "" {
-				emit(choice.Delta.Content)
-			}
+			emitChatOutput(choice, emit)
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -252,7 +256,7 @@ func streamOpenAIChat(ctx context.Context, s State, emit func(string)) error {
 	return nil
 }
 
-func streamAnthropic(ctx context.Context, s State, emit func(string)) error {
+func streamAnthropic(ctx context.Context, s State, emit func(OutputEvent)) error {
 	options := []anthropicoption.RequestOption{anthropicoption.WithAPIKey(s.Provider.APIKey)}
 	if s.HTTPClient != nil {
 		options = append(options, anthropicoption.WithHTTPClient(s.HTTPClient), anthropicoption.WithMaxRetries(0))
@@ -283,11 +287,9 @@ func streamAnthropic(ctx context.Context, s State, emit func(string)) error {
 	params := anthropic.MessageNewParams{Model: anthropic.Model(s.Provider.Model), MaxTokens: max, Messages: messages, System: system}
 	stream := client.Messages.NewStreaming(ctx, params)
 	defer stream.Close()
+	toolKeys := make(map[string]string)
 	for stream.Next() {
-		event := stream.Current()
-		if event.Type == "content_block_delta" && event.Delta.Type == "text_delta" && event.Delta.Text != "" {
-			emit(event.Delta.Text)
-		}
+		emitAnthropicOutput(stream.Current(), toolKeys, emit)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -298,7 +300,7 @@ func streamAnthropic(ctx context.Context, s State, emit func(string)) error {
 	return nil
 }
 
-func streamGemini(ctx context.Context, s State, emit func(string)) error {
+func streamGemini(ctx context.Context, s State, emit func(OutputEvent)) error {
 	cfg := &genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: s.Provider.APIKey, HTTPClient: s.HTTPClient}
 	if s.Provider.BaseURL != "" {
 		cfg.HTTPOptions.BaseURL = s.Provider.BaseURL
@@ -345,14 +347,13 @@ func streamGemini(ctx context.Context, s State, emit func(string)) error {
 	if s.Provider.MaxTokens > 0 {
 		config.MaxOutputTokens = int32(s.Provider.MaxTokens)
 	}
+	var nextTool int
 	for result, err := range client.Models.GenerateContentStream(ctx, s.Provider.Model, contents, config) {
 		if err != nil {
 			return fmt.Errorf("Gemini stream failed: %w", err)
 		}
 		if result != nil {
-			if delta := result.Text(); delta != "" {
-				emit(delta)
-			}
+			emitGeminiOutput(result, &nextTool, emit)
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()

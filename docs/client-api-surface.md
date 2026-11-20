@@ -95,7 +95,14 @@ Successful acknowledgement:
 {"id":"run-1","ok":true,"data":{"request_id":"run-1"}}
 ```
 
-The server emits `delta` events during text streaming and a `conversation` event containing the latest full stored chat and revision after the initial turn, at durable progress checkpoints and at completion. Example shape:
+The server emits `delta` events with answer text, `reasoning_delta` events
+with provider-visible reasoning text and its answer offset, and `tool_activity`
+events with a tool record keyed by activity ID. A tool activity reports provider
+output. It does not authorize or invoke a tool. Arguments are published when they
+can be checked as a complete value. Existing clients can ignore the additive
+event kinds and read the same fields in the authoritative `conversation` event.
+That event contains the latest stored chat and revision after the initial turn,
+at durable progress checkpoints and at completion. Example shape:
 
 ```json
 {"session_id":"chat-1","seq":3,"request_id":"run-1","kind":"conversation","data":{"revision":2,"conversation":{"id":"chat-1","title":"Example","created_at":1,"updated_at":3,"messages":[]}}}

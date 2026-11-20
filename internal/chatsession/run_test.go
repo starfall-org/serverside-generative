@@ -30,7 +30,15 @@ func TestRunTextPersistenceAndDedupe(t *testing.T) {
 		seen <- body
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n")
+		for _, delta := range []string{
+			`{"reasoning_content":"Checking details"}`,
+			`{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"lookup","arguments":"{\"query\":"}}]}`,
+			`{"tool_calls":[{"index":0,"function":{"arguments":"\"value\"}"}}]}`,
+			`{"content":"hello"}`,
+		} {
+			fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":%s}]}\n\n", delta)
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer upstream.Close()
 	dir := filepath.Join(t.TempDir(), "data")
@@ -54,6 +62,7 @@ func TestRunTextPersistenceAndDedupe(t *testing.T) {
 	deadline := time.After(10 * time.Second)
 	cursor := uint64(0)
 	done := false
+	kinds := map[string]bool{}
 	for !done {
 		events, err := m.Events("a", "c", cursor)
 		if err != nil {
@@ -61,6 +70,7 @@ func TestRunTextPersistenceAndDedupe(t *testing.T) {
 		}
 		for _, e := range events {
 			cursor = e.Seq
+			kinds[e.Kind] = true
 			if e.Kind == "error" {
 				t.Fatalf("run error: %+v", e)
 			}
@@ -76,6 +86,11 @@ func TestRunTextPersistenceAndDedupe(t *testing.T) {
 			}
 		}
 	}
+	for _, kind := range []string{"delta", "reasoning_delta", "tool_activity"} {
+		if !kinds[kind] {
+			t.Fatalf("missing %s event: %v", kind, kinds)
+		}
+	}
 	request := <-seen
 	if request["temperature"] != 0.7 || request["top_p"] != 0.8 {
 		t.Fatalf("sampling settings not sent: %+v", request)
@@ -83,6 +98,14 @@ func TestRunTextPersistenceAndDedupe(t *testing.T) {
 	v, err := m.Get("a", "c")
 	if err != nil || !strings.Contains(string(v.Conversation), "hello") || calls.Load() != 1 || v.Revision != 3 {
 		t.Fatalf("view=%s rev=%d calls=%d err=%v", v.Conversation, v.Revision, calls.Load(), err)
+	}
+	for _, field := range []string{`"reasoning_content":"Checking details"`, `"name":"lookup"`, `"arguments":"{\"query\":\"value\"}"`, `"status":"error"`} {
+		if !strings.Contains(string(v.Conversation), field) {
+			t.Fatalf("missing typed output %s in %s", field, v.Conversation)
+		}
+	}
+	if _, err = runtimeState(runtime, v.Conversation, "next"); err != nil {
+		t.Fatalf("typed history blocks follow-up: %v", err)
 	}
 	// Reopening must select the provider/model that actually generated the turn.
 	var savedModel struct {

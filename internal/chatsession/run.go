@@ -239,13 +239,17 @@ func (m *Manager) Run(owner, id, requestID, content string) error {
 		return ErrInvalid
 	}
 	now := time.Now().UTC()
-	makeMsg := func(mid, role, text string, interrupted bool) json.RawMessage {
-		v := map[string]any{"id": mid, "role": role, "versions": []any{map[string]any{"content": text, "timestamp": strconv.FormatInt(now.UnixMilli(), 10), "files": []string{}, "toolActivity": []any{}, "generation_interrupted": interrupted, "provider_id": state.Provider.ID, "model_id": state.Provider.Model, "model_display_name": state.Provider.Model}}, "active_version_index": 0}
+	makeMsg := func(mid, role, text string, interrupted bool, output *runOutput) json.RawMessage {
+		version := map[string]any{"content": text, "timestamp": strconv.FormatInt(now.UnixMilli(), 10), "files": []string{}, "toolActivity": []any{}, "generation_interrupted": interrupted, "provider_id": state.Provider.ID, "model_id": state.Provider.Model, "model_display_name": state.Provider.Model}
+		if output != nil {
+			output.applyToVersion(version)
+		}
+		v := map[string]any{"id": mid, "role": role, "versions": []any{version}, "active_version_index": 0}
 
 		b, _ := json.Marshal(v)
 		return b
 	}
-	msgs = append(msgs, makeMsg(userID, "user", content, false), makeMsg(modelID, "model", "", true))
+	msgs = append(msgs, makeMsg(userID, "user", content, false, nil), makeMsg(modelID, "model", "", true, nil))
 	doc["messages"], _ = json.Marshal(msgs)
 	// Persist the actual model used so another client reopening this chat will not
 	// accidentally continue it with a different catalogue default.
@@ -288,10 +292,9 @@ func (m *Manager) Run(owner, id, requestID, content string) error {
 	m.emitConversation(s, id, requestID)
 	go func() {
 		defer lease()
-		var text strings.Builder
-		guard := newStreamGuard(secrets)
+		output := newRunOutput(modelID, secrets)
 		rawBytes := 0
-		buildResult := func(content string, interrupted bool) (json.RawMessage, error) {
+		buildResult := func(interrupted bool) (json.RawMessage, error) {
 			var d map[string]json.RawMessage
 			if json.Unmarshal(s.conversation, &d) != nil {
 				return nil, ErrInvalid
@@ -300,7 +303,7 @@ func (m *Manager) Run(owner, id, requestID, content string) error {
 			if json.Unmarshal(d["messages"], &messages) != nil || len(messages) == 0 {
 				return nil, ErrInvalid
 			}
-			messages[len(messages)-1] = makeMsg(modelID, "model", content, interrupted)
+			messages[len(messages)-1] = makeMsg(modelID, "model", "", interrupted, output)
 			d["messages"], _ = json.Marshal(messages)
 			d["updated_at"], _ = json.Marshal(time.Now().UnixMilli())
 			return json.Marshal(d)
@@ -322,8 +325,8 @@ func (m *Manager) Run(owner, id, requestID, content string) error {
 						m.mu.Unlock()
 						return
 					}
-					if text.Len() != persisted {
-						result, er := buildResult(text.String(), true)
+					if output.changes != persisted {
+						result, er := buildResult(true)
 						if er == nil && len(result) > maxConversationBytes {
 							er = ErrLimit
 						}
@@ -335,7 +338,7 @@ func (m *Manager) Run(owner, id, requestID, content string) error {
 							if er == nil {
 								s.conversation = clone(snap.Conversation)
 								s.revision = snap.Revision
-								persisted = text.Len()
+								persisted = output.changes
 								m.emitConversation(s, id, requestID)
 							}
 						}
@@ -348,30 +351,28 @@ func (m *Manager) Run(owner, id, requestID, content string) error {
 				}
 			}
 		}()
-		publish := func(delta string) {
-			if delta == "" {
-				return
-			}
-			m.mu.Lock()
-			defer m.mu.Unlock()
-			if m.sessions[id] == s {
-				text.WriteString(delta)
-				m.emit(s, id, requestID, "delta", map[string]any{"text": delta})
-			}
-		}
-		streamErr := execution.Stream(ctx, state, func(delta string) {
-			rawBytes += len(delta)
+		emit := func(kind string, data any) { m.emit(s, id, requestID, kind, data) }
+		streamErr := execution.StreamOutput(ctx, state, func(event execution.OutputEvent) {
+			rawBytes += len(event.Text) + len(event.Tool.Arguments) + len(event.Tool.Result) + len(event.Tool.Name)
 			if rawBytes > 1<<20 {
 				cancel()
 				return
 			}
-			publish(guard.push(delta, false))
-			if guard.leaked {
+			m.mu.Lock()
+			if m.sessions[id] == s && !output.leaked {
+				output.apply(event, emit)
+			}
+			m.mu.Unlock()
+			if output.leaked {
 				cancel()
 			}
 		})
-		publish(guard.push("", true))
-		if guard.leaked {
+		m.mu.Lock()
+		if m.sessions[id] == s {
+			output.finish(emit)
+		}
+		m.mu.Unlock()
+		if output.leaked {
 			streamErr = errors.New("runtime secret in provider output")
 		}
 
@@ -389,7 +390,7 @@ func (m *Manager) Run(owner, id, requestID, content string) error {
 			m.emit(s, id, requestID, "error", map[string]any{"code": "persistence_failed"})
 			return
 		}
-		result, err := buildResult(text.String(), streamErr != nil)
+		result, err := buildResult(streamErr != nil)
 		if err != nil || len(result) > maxConversationBytes {
 			m.emit(s, id, requestID, "error", map[string]any{"code": "resource_exhausted"})
 			return
@@ -409,7 +410,7 @@ func (m *Manager) Run(owner, id, requestID, content string) error {
 		m.emitConversation(s, id, requestID)
 		if streamErr != nil {
 			code := "remote_execution_failed"
-			if guard.leaked {
+			if output.leaked {
 				code = "secret_leak_blocked"
 			} else if state.WireAuthMethod == "oauth" && execution.Unauthorized(streamErr) {
 				code = "auth_required"
@@ -595,8 +596,13 @@ func runtimeState(raw, conversation json.RawMessage, content string) (execution.
 			return execution.State{}, ErrInvalid
 		}
 		ver := msg.Versions[msg.Active]
-		if len(ver.Files) > 0 || len(ver.ToolActivity) > 0 || ver.Reasoning != "" || ver.Signature != "" {
+		if len(ver.Files) > 0 || ver.Signature != "" {
 			return execution.State{}, ErrUnsupported
+		}
+		// Preserve thinking and tool records in history. The text runner uses
+		// the answer in subsequent turns and never replays recorded actions.
+		if msg.Role == "model" && ver.Content == "" && (len(ver.ToolActivity) > 0 || ver.Reasoning != "") {
+			continue
 		}
 		role := msg.Role
 		if role == "model" {
