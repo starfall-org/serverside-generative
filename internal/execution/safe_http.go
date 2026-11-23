@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"strings"
 	"time"
+
+	"golang.org/x/net/http/httpguts"
 )
 
 // SafeHTTPClient pins each connection to a checked DNS result and disables
@@ -77,37 +79,63 @@ func ValidAuthKey(method, key string) bool {
 	return true
 }
 
+func ValidProviderHeaders(headers map[string]string) bool {
+	if len(headers) > 64 {
+		return false
+	}
+	seen := make(map[string]bool, len(headers))
+	for name, value := range headers {
+		if len(name) > 128 || len(value) > 16<<10 || !httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(value) {
+			return false
+		}
+		key := strings.ToLower(name)
+		if seen[key] || strings.HasPrefix(key, "proxy-") {
+			return false
+		}
+		switch key {
+		case "host", "content-length", "transfer-encoding", "connection", "keep-alive", "trailer", "te", "upgrade", "expect":
+			return false
+		}
+		seen[key] = true
+	}
+	return true
+}
+
 type wireAuthTransport struct {
 	base               http.RoundTripper
 	method, key, value string
+	headers            map[string]string
 }
 
 func (t *wireAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
 	r.Header = req.Header.Clone()
-	r.Header.Del("Authorization")
-	r.Header.Del("X-Api-Key")
-	r.Header.Del("X-Goog-Api-Key")
-	u := *req.URL
-	r.URL = &u
-	q := r.URL.Query()
-	q.Del("key")
-	switch t.method {
-	case "bearer_token", "oauth":
-		r.Header.Set("Authorization", "Bearer "+t.value)
-	case "custom_header":
-		r.Header.Set(t.key, t.value)
-	case "query_param":
-		q.Set(t.key, t.value)
+	if t.method != "" && t.method != "platform_default" {
+		r.Header.Del("Authorization")
+		r.Header.Del("X-Api-Key")
+		r.Header.Del("X-Goog-Api-Key")
+		q := r.URL.Query()
+		q.Del("key")
+		switch t.method {
+		case "bearer_token", "oauth":
+			r.Header.Set("Authorization", "Bearer "+t.value)
+		case "custom_header":
+			r.Header.Set(t.key, t.value)
+		case "query_param":
+			q.Set(t.key, t.value)
+		}
+		r.URL.RawQuery = q.Encode()
 	}
-	r.URL.RawQuery = q.Encode()
+	for name, value := range t.headers {
+		r.Header.Set(name, value)
+	}
 	return t.base.RoundTrip(r)
 }
-func WithWireAuth(client *http.Client, method, key, value string) *http.Client {
-	if method == "" || method == "platform_default" {
+func WithWireAuth(client *http.Client, method, key, value string, headers map[string]string) *http.Client {
+	if (method == "" || method == "platform_default") && len(headers) == 0 {
 		return client
 	}
 	clone := *client
-	clone.Transport = &wireAuthTransport{base: client.Transport, method: method, key: key, value: value}
+	clone.Transport = &wireAuthTransport{base: client.Transport, method: method, key: key, value: value, headers: headers}
 	return &clone
 }

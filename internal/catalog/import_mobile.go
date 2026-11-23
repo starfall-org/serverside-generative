@@ -66,9 +66,35 @@ func (s *Store) ImportMobile(kind string, raw json.RawMessage) error {
 		}
 		// Account markers on Android are not portable OAuth credentials.
 		if fields.Auth.Method == "oauth" || fields.Auth.OAuthAccountID != nil ||
-			nonempty(config["oauthAccounts"]) || nonempty(config["headers"]) ||
+			nonempty(config["oauthAccounts"]) ||
 			nonempty(config["httpProxy"]) || nonempty(config["socksProxy"]) {
 			return ErrImportUnsupported
+		}
+		var connectionRef string
+		if nonempty(config["headers"]) {
+			var private struct {
+				Headers map[string]string `json:"headers"`
+			}
+			if json.Unmarshal(fields.Config, &private) != nil || !execution.ValidProviderHeaders(private.Headers) {
+				return ErrImportUnsupported
+			}
+			encoded, err := json.Marshal(private)
+			if err != nil {
+				return err
+			}
+			connectionRef, err = addSecret("connection", string(encoded))
+			if err != nil {
+				return err
+			}
+			delete(config, "headers")
+			sanitized, err := json.Marshal(original)
+			if err != nil {
+				return err
+			}
+			parsed, err = compat.ParseMobileProvider(sanitized)
+			if err != nil {
+				return ErrImportUnsupported
+			}
 		}
 		safe, err := parsed.StoredMetadataJSON()
 		if err != nil || yaml.Unmarshal(safe, &record) != nil {
@@ -76,6 +102,9 @@ func (s *Store) ImportMobile(kind string, raw json.RawMessage) error {
 		}
 		// Folder membership is local organization, not part of the connection.
 		delete(record, "groupId")
+		if connectionRef != "" {
+			record["connection_ref"] = connectionRef
+		}
 		metadata, _ := record["config"].(map[string]any)
 		if metadata == nil {
 			metadata = map[string]any{}
@@ -86,11 +115,13 @@ func (s *Store) ImportMobile(kind string, raw json.RawMessage) error {
 		}
 		method := fields.Auth.Method
 		key, value := stringValue(fields.Auth.Key), stringValue(fields.Auth.Value)
+		entries, _ := config["apiKeys"].([]any)
+		multiple, _ := config["multipleApiKeys"].(bool)
 		if method == "platform_default" || method == "other" {
-			if value == "" {
+			if fields.Auth.Value == nil {
 				value = key
 			}
-			if value == "" {
+			if value == "" && !(multiple && len(entries) > 0) {
 				method = "none"
 			} else {
 				method = "platform_default"
@@ -126,7 +157,7 @@ func (s *Store) ImportMobile(kind string, raw json.RawMessage) error {
 			auth["credential_ref"] = ref
 		}
 		record["auth"] = auth
-		if entries, ok := config["apiKeys"].([]any); ok {
+		if entries != nil {
 			keys := make([]any, 0, len(entries))
 			for _, entry := range entries {
 				item, ok := entry.(map[string]any)

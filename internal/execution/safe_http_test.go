@@ -45,7 +45,7 @@ func TestWireAuthModes(t *testing.T) {
 	defer srv.Close()
 	cases := []struct{ method, key, value, header, query string }{{"none", "", "", "", ""}, {"bearer_token", "", "bearer-secret", "Bearer bearer-secret", ""}, {"custom_header", "X-Custom", "custom-secret", "", ""}, {"query_param", "auth", "query-secret", "", "query-secret"}}
 	for _, tt := range cases {
-		client := WithWireAuth(SafeHTTPClient(true), tt.method, tt.key, tt.value)
+		client := WithWireAuth(SafeHTTPClient(true), tt.method, tt.key, tt.value, nil)
 		req, _ := http.NewRequest("GET", srv.URL+"/?key=unused", nil)
 		req.Header.Set("Authorization", "Bearer unused")
 		req.Header.Set("X-Api-Key", "unused")
@@ -64,6 +64,16 @@ func TestWireAuthModes(t *testing.T) {
 	}
 	if ValidAuthKey("custom_header", "Host") || ValidAuthKey("custom_header", "Bad\r\nName") {
 		t.Fatal("invalid header accepted")
+	}
+	for _, headers := range []map[string]string{
+		{"Host": "other.example.invalid"},
+		{"Proxy-Authorization": "sentinel"},
+		{"X-Provider-Key": "one", "x-provider-key": "two"},
+		{"X-Provider-Key": "sentinel\r\nAuthorization: other"},
+	} {
+		if ValidProviderHeaders(headers) {
+			t.Fatal("unsafe provider headers accepted")
+		}
 	}
 }
 

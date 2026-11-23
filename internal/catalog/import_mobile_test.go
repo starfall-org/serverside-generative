@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/starfall-org/serverside-generative/internal/catalog"
+	"github.com/starfall-org/serverside-generative/internal/chatsession"
 	"github.com/starfall-org/serverside-generative/internal/storedruntime"
 )
 
@@ -56,6 +57,48 @@ func TestMobileProviderImportPreservesModelsAndEncryptedKeys(t *testing.T) {
 	after, err := s.Get()
 	if err != nil || after.Manifest.Revision != bundle.Manifest.Revision {
 		t.Fatal("duplicate changed catalog", err)
+	}
+}
+
+func TestMobileProviderImportWithDefaultAuthAndOnlyMultipleKeys(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	store := catalog.New(dir)
+	// Android omits the default auth method and empty API key labels.
+	payload := json.RawMessage(`{"id":"p","name":"Provider","type":"openai","baseUrl":"https://example.invalid/v1",
+		"auth":{"value":""},"config":{"modelIds":["model"],"multipleApiKeys":true,
+		"customListModelsUrl":"https://example.invalid/models","customEndpoints":{"catalog":"https://example.invalid/catalog"},
+		"apiKeys":[{"id":"main","value":"main-credential-sentinel"},{"id":"backup","label":"Backup","value":"backup-credential-sentinel"}]}}`)
+	if err := store.ImportMobile("provider", payload); err != nil {
+		t.Fatal(err)
+	}
+	index, err := storedruntime.ReadCatalogValidated(dir, chatsession.ValidateStoredRuntime)
+	if err != nil || len(index.Providers) != 1 || len(index.Providers[0].Keys) != 2 ||
+		index.Providers[0].Keys[0].Label != "" || index.Providers[0].Keys[1].Label != "Backup" {
+		t.Fatalf("key metadata not preserved: %+v, %v", index, err)
+	}
+	if models := index.Providers[0].Models; len(models) != 1 || models[0].Availability != "key_selection_required" {
+		t.Fatalf("imported model not selectable: %+v", models)
+	}
+	for _, key := range []string{"main", "backup"} {
+		request, _ := json.Marshal(map[string]string{"source": "stored", "provider_id": "p", "model_id": "model", "key_id": key})
+		runtime, err := storedruntime.Resolve(dir, request)
+		var resolved struct {
+			Provider struct {
+				Auth struct{ Method, Value string }
+			}
+		}
+		if err != nil || json.Unmarshal(runtime, &resolved) != nil || resolved.Provider.Auth.Method != "platform_default" ||
+			resolved.Provider.Auth.Value != key+"-credential-sentinel" {
+			t.Fatalf("selected key %q did not resolve with platform authentication: %v", key, err)
+		}
+	}
+	bundle, err := store.Get()
+	if err != nil || strings.Contains(bundle.Files["providers.yaml"], "credential-sentinel") {
+		t.Fatal("plaintext credential in catalog", err)
+	}
+	if !strings.Contains(bundle.Files["providers.yaml"], "https://example.invalid/catalog") ||
+		!strings.Contains(bundle.Files["providers.yaml"], "https://example.invalid/models") {
+		t.Fatal("discovery metadata was not retained")
 	}
 }
 

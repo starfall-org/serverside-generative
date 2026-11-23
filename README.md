@@ -126,7 +126,7 @@ It emits one JSON object containing `client_id`, `secret`, `fingerprint`, `endpo
 ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes USER@HOST generative stream --stdio
 ```
 
-Use `--data-socket PATH` for a non-default daemon socket. Never allocate a PTY or pass client secrets in SSH argv. Only trusted SSH users should be able to run the pairing command. TCP pairing **does not** use a QR, HTTP request or PIN.
+Linux and macOS support SSH stdio through a private socket. The Android app runs `generative` in a non-interactive SSH session, so the executable must be on that session's `PATH`. Its pairing and stream commands briefly wait for the daemon socket after starting the managed service. Use `--data-socket PATH` for a non-default daemon socket when calling `stream` directly. Never allocate a PTY or pass client secrets in SSH argv. Only trusted SSH users should be able to run the pairing command. TCP pairing **does not** use a QR, HTTP request or PIN.
 
 ### One URL for HTTP and WebSocket pairing
 
@@ -386,10 +386,9 @@ Each payload is prefixed by a **4-byte unsigned big-endian byte length**. Creden
 ## Limitations / next steps
 
 - The API/MCP SDK adapters support text generation and explicit MCP calls. Built-in terminal tools are directly callable by an authenticated client, but **automatic model tool-use loops** are not yet wired into the SDKs.
-- TCP hole punching and address discovery remain separate work. Legacy v4 signaling still requires a reachable TCP data endpoint; v5 can also use the HTTP, WebSocket or Linux SSH stdio data paths.
+- TCP hole punching and address discovery remain separate work. Legacy v4 signaling still requires a reachable TCP data endpoint. V5 can use HTTP, WebSocket or SSH stdio on Linux and macOS.
 - **Legacy v4** RAM event buffers do not survive restart. **V5 chat history remains stored in JSON** and can be reopened by session ID; only mobile-supplied provider/MCP runtime must be re-supplied. V5 live event sequences remain bounded RAM.
-- **Legacy v4** in-memory limits include 128 sessions, 2 MiB state and 2,048 retained events (`sync_gap`). V5 also bounds RAM events (`event_gap`) and currently has a roughly 3 MiB full-conversation limit within a 4 MiB transport frame; larger chat chunking remains to be implemented.
-- A future Android client should securely store paired identity, but its local temporary/sync setting must never change the server's unconditional v5 chat persistence; Android integration is not in scope.
+- **Legacy v4** in-memory limits include 128 sessions, 2 MiB state and 2,048 retained events (`sync_gap`). V5 also bounds RAM events (`event_gap`). Whole-snapshot RPCs and generation support conversations up to 3 MiB, and chunked transfer supports up to 8 MiB.
 - Credential revocation should be enforced across already-active connections as this project evolves.
 - SDK/network errors are intentionally redacted to a generic `remote_execution_failed` event to avoid leaking API credentials or sensitive response metadata. More detailed safe error classes are future work.
 - SDK dependencies may increase binary size; CI builds standalone binaries without requiring a Go installation on the deployment server.

@@ -218,7 +218,7 @@ func (m *Manager) Run(owner, id, requestID, content string) error {
 		}
 	}
 	state.HTTPClient = execution.SafeHTTPClient(m.allowLocalAPI)
-	state.HTTPClient = execution.WithWireAuth(state.HTTPClient, state.WireAuthMethod, state.WireAuthKey, state.WireAuthValue)
+	state.HTTPClient = execution.WithWireAuth(state.HTTPClient, state.WireAuthMethod, state.WireAuthKey, state.WireAuthValue, state.WireHeaders)
 	if err = state.ValidateModel(); err != nil {
 		return ErrInvalid
 	}
@@ -437,12 +437,13 @@ func runtimeState(raw, conversation json.RawMessage, content string) (execution.
 	var v struct {
 		Source   string `json:"source"`
 		Provider struct {
-			ID          string          `json:"id"`
-			Type        string          `json:"type"`
-			BaseURL     string          `json:"baseUrl"`
-			ModelID     string          `json:"modelId"`
-			ModelConfig json.RawMessage `json:"modelConfig"`
-			Config      json.RawMessage `json:"config"`
+			ID          string            `json:"id"`
+			Type        string            `json:"type"`
+			BaseURL     string            `json:"baseUrl"`
+			ModelID     string            `json:"modelId"`
+			ModelConfig json.RawMessage   `json:"modelConfig"`
+			Config      json.RawMessage   `json:"config"`
+			Headers     map[string]string `json:"headers"`
 			Auth        struct {
 				Method string `json:"method"`
 				Key    string `json:"key"`
@@ -456,6 +457,9 @@ func runtimeState(raw, conversation json.RawMessage, content string) (execution.
 	}
 	if json.Unmarshal(raw, &v) != nil || v.Source != "mobile_ephemeral" {
 		return execution.State{}, ErrUnsupported
+	}
+	if !execution.ValidProviderHeaders(v.Provider.Headers) {
+		return execution.State{}, ErrInvalid
 	}
 	if len(v.MCP) > 0 || len(v.CustomTools) > 0 {
 		return execution.State{}, ErrUnsupported
@@ -548,7 +552,10 @@ func runtimeState(raw, conversation json.RawMessage, content string) (execution.
 	if method == "none" || method == "custom_header" || method == "query_param" {
 		apiKey = "unused"
 	}
-	state := execution.State{Provider: execution.Provider{ID: v.Provider.ID, Platform: platform, APIKey: apiKey, Model: v.Provider.ModelID, BaseURL: v.Provider.BaseURL, MaxTokens: maxTokens, Temperature: temperature, TopP: topP, TopK: topK}, WireAuthMethod: method, WireAuthKey: key, WireAuthValue: secret}
+	state := execution.State{
+		Provider:       execution.Provider{ID: v.Provider.ID, Platform: platform, APIKey: apiKey, Model: v.Provider.ModelID, BaseURL: v.Provider.BaseURL, MaxTokens: maxTokens, Temperature: temperature, TopP: topP, TopK: topK},
+		WireAuthMethod: method, WireAuthKey: key, WireAuthValue: secret, WireHeaders: v.Provider.Headers,
+	}
 	if len(c.Prompts) > 32 || len(v.Instructions) > 32 {
 		return execution.State{}, ErrInvalid
 	}

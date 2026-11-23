@@ -49,11 +49,6 @@ func Open(dir string) (*Store, error) {
 		}
 	}()
 	dbPath, keyPath := filepath.Join(dir, "data.sqlite"), filepath.Join(dir, "master.key")
-	_, dbStatErr := os.Lstat(dbPath)
-	dbExists := dbStatErr == nil
-	if dbStatErr != nil && !errors.Is(dbStatErr, os.ErrNotExist) {
-		return nil, dbStatErr
-	}
 	key, err := os.ReadFile(keyPath)
 	if errors.Is(err, os.ErrNotExist) {
 		if _, e := os.Lstat(dbPath); e == nil {
@@ -116,28 +111,45 @@ func Open(dir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if !success {
+			_ = db.Close()
+		}
+	}()
 	db.SetMaxOpenConns(1)
-	_, err = db.Exec(`PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;
- CREATE TABLE IF NOT EXISTS master_key_check(id INTEGER PRIMARY KEY CHECK(id=1),nonce BLOB NOT NULL,ciphertext BLOB NOT NULL);
+	if _, err = db.Exec(`PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;`); err != nil {
+		return nil, err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	// A stop during first startup can leave an empty SQLite file. Publish the
+	// schema and its key check together, while refusing to bless an existing
+	// schema whose key check is missing.
+	var schemaObjects int
+	if err = tx.QueryRow(`SELECT count(*) FROM sqlite_schema`).Scan(&schemaObjects); err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(`CREATE TABLE IF NOT EXISTS master_key_check(id INTEGER PRIMARY KEY CHECK(id=1),nonce BLOB NOT NULL,ciphertext BLOB NOT NULL);
  CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
  INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(1,unixepoch());
  CREATE TABLE IF NOT EXISTS credentials(owner_kind TEXT NOT NULL,owner_id TEXT NOT NULL,secret_id TEXT NOT NULL,label TEXT NOT NULL DEFAULT '',secret_kind TEXT NOT NULL,cipher_version INTEGER NOT NULL,nonce BLOB NOT NULL,ciphertext BLOB NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(owner_kind,owner_id,secret_id));
  CREATE TABLE IF NOT EXISTS custom_http_tools(id TEXT PRIMARY KEY,cipher_version INTEGER NOT NULL,nonce BLOB NOT NULL,ciphertext BLOB NOT NULL,updated_at INTEGER NOT NULL);`)
 	if err != nil {
-		db.Close()
 		return nil, err
 	}
 	store := &Store{db: db, aead: aead, unlock: unlock}
 	var nonce, enc []byte
-	err = db.QueryRow(`SELECT nonce,ciphertext FROM master_key_check WHERE id=1`).Scan(&nonce, &enc)
-	if errors.Is(err, sql.ErrNoRows) && dbExists {
-		db.Close()
+	err = tx.QueryRow(`SELECT nonce,ciphertext FROM master_key_check WHERE id=1`).Scan(&nonce, &enc)
+	if errors.Is(err, sql.ErrNoRows) && schemaObjects != 0 {
 		return nil, errors.New("database has no master key check")
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		nonce, enc, err = store.seal([]byte("serverside-key-check-v1"), "master-key-check")
 		if err == nil {
-			_, err = db.Exec(`INSERT INTO master_key_check(id,nonce,ciphertext) VALUES(1,?,?)`, nonce, enc)
+			_, err = tx.Exec(`INSERT INTO master_key_check(id,nonce,ciphertext) VALUES(1,?,?)`, nonce, enc)
 		}
 	} else if err == nil {
 		var plain []byte
@@ -147,7 +159,9 @@ func Open(dir string) (*Store, error) {
 		}
 	}
 	if err != nil {
-		db.Close()
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
 	success = true

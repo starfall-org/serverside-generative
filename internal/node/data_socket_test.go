@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package node
 
@@ -18,8 +18,24 @@ import (
 	"github.com/starfall-org/serverside-generative/internal/rpc"
 )
 
+func dataSocketTestDir(t *testing.T) string {
+	t.Helper()
+	// Use the real path for /tmp, which is a symlink on macOS. Short paths
+	// also leave room for filenames within the Unix socket path limit.
+	base, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(base, "gen-socket-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func TestDataSocketPairAndRPC(t *testing.T) {
-	n, err := New(Config{IdentityDir: t.TempDir(), DataDir: t.TempDir() + "/private-data"})
+	n, err := New(Config{IdentityDir: dataSocketTestDir(t), DataDir: t.TempDir() + "/private-data"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +156,7 @@ func TestDataSocketPairAndRPC(t *testing.T) {
 }
 
 func TestDataSocketRejectsSymlinkAndUnsafeModes(t *testing.T) {
-	root := t.TempDir()
+	root := dataSocketTestDir(t)
 	outside := t.TempDir()
 	link := filepath.Join(root, "link")
 	if err := os.Symlink(outside, link); err != nil {

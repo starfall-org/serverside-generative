@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package node
 
@@ -61,8 +61,8 @@ func authorizedLocalPeer(conn net.Conn) bool {
 	}
 	allowed := false
 	if err = raw.Control(func(fd uintptr) {
-		cred, e := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
-		allowed = e == nil && cred.Uid == uint32(os.Geteuid())
+		uid, err := localPeerUID(int(fd))
+		allowed = err == nil && uid == uint32(os.Geteuid())
 	}); err != nil {
 		return false
 	}

@@ -107,7 +107,11 @@ func validateProviderConfig(config map[string]json.RawMessage) error {
 		seen := map[string]bool{}
 		for _, item := range keys {
 			var fields map[string]json.RawMessage
-			if json.Unmarshal(item, &fields) != nil || fields == nil || !mediaPresent(fields, "id", "label") {
+			if json.Unmarshal(item, &fields) != nil || fields == nil || !mediaPresent(fields, "id") {
+				return ErrMobileProvider
+			}
+			var label string
+			if rawLabel, ok := fields["label"]; ok && (string(rawLabel) == "null" || json.Unmarshal(rawLabel, &label) != nil) {
 				return ErrMobileProvider
 			}
 			var id string

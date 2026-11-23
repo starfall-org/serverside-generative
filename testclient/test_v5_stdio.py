@@ -8,6 +8,7 @@ from pathlib import Path
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 
 from test_integration import BINARY, ServerRunner
@@ -39,6 +40,35 @@ def read_frame(stream):
 
 
 class StdioIntegration(unittest.TestCase):
+    def test_stdio_commands_wait_for_daemon_sockets(self):
+        with tempfile.TemporaryDirectory(prefix='gen-start-', dir=Path('/tmp').resolve()) as temp:
+            root = Path(temp) / 'identity'
+            server = ServerRunner(root)
+            pair_cmd = [str(BINARY), 'pair', '--stdio', '--transport', 'tcp', '--ipc', str(server.ipc)]
+            stream_cmd = [str(BINARY), 'stream', '--stdio', '--data-socket', str(root / 'run' / 'data.sock')]
+            with subprocess.Popen(pair_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as pair, \
+                    subprocess.Popen(stream_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, bufsize=0) as bridge:
+                try:
+                    time.sleep(.15)
+                    self.assertIsNone(pair.poll(), 'pair exited before the daemon started')
+                    self.assertIsNone(bridge.poll(), 'stream exited before the daemon started')
+                    server.start()
+                    stdout, stderr = pair.communicate(timeout=5)
+                    self.assertEqual(pair.returncode, 0, stderr)
+                    identity = json.loads(stdout)
+                    self.assertEqual(identity['transport'], 'tcp')
+                    write_frame(bridge.stdin, {'type': 'auth', 'protocol': 5, 'client_id': identity['client_id'],
+                                               'secret': identity['secret']})
+                    self.assertEqual(read_frame(bridge.stdout)['type'], 'paired')
+                    bridge.stdin.close()
+                    self.assertEqual(bridge.wait(timeout=5), 0)
+                finally:
+                    for process in (pair, bridge):
+                        if process.poll() is None:
+                            process.kill()
+                    server.stop()
+
     def test_ticket_pairing_and_memory_rpc_through_stdio(self):
         with tempfile.TemporaryDirectory(prefix='ssg-stdio-') as temp:
             root = Path(temp) / 'identity'
@@ -64,17 +94,26 @@ class StdioIntegration(unittest.TestCase):
                         write_frame(bridge.stdin, {'id': 'configure', 'op': 'session.configure', 'session_id': 'stdio', 'data': {'runtime': runtime}})
                         self.assertTrue(read_frame(bridge.stdout)['ok'])
                         write_frame(bridge.stdin, {'id': 'run', 'op': 'session.run', 'session_id': 'stdio', 'data': {'content': 'hello'}})
+                        reply = read_frame(bridge.stdout)
+                        self.assertEqual(reply['id'], 'run')
+                        self.assertTrue(reply['ok'])
+                        cursor = 0
                         completed = False
-                        replied = False
-                        while not (completed and replied):
-                            message = read_frame(bridge.stdout)
-                            self.assertNotIn(SENTINEL, json.dumps(message))
-                            if message.get('id') == 'run':
-                                self.assertTrue(message['ok'])
-                                replied = True
-                            if message.get('kind') == 'error':
-                                self.assertEqual(message['data']['code'], 'secret_leak_blocked')
-                                completed = True
+                        deadline = time.monotonic() + 8
+                        while not completed and time.monotonic() < deadline:
+                            write_frame(bridge.stdin, {'id': 'poll', 'op': 'session.events', 'session_id': 'stdio', 'data': {'after': cursor}})
+                            reply = read_frame(bridge.stdout)
+                            self.assertEqual(reply['id'], 'poll')
+                            self.assertTrue(reply['ok'])
+                            self.assertNotIn(SENTINEL, json.dumps(reply))
+                            for event in reply['data']:
+                                cursor = event['seq']
+                                if event['kind'] == 'error':
+                                    self.assertEqual(event['data']['code'], 'secret_leak_blocked')
+                                    completed = True
+                            if not completed:
+                                time.sleep(.05)
+                        self.assertTrue(completed, 'generation did not emit its terminal event')
                     finally:
                         upstream.shutdown()
                         upstream.server_close()
@@ -97,7 +136,6 @@ class RealSshIntegration(unittest.TestCase):
         import getpass
         import shutil
         import socket
-        import time
         from test_integration import open_port
 
         sshd = '/usr/sbin/sshd'

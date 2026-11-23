@@ -79,9 +79,24 @@ func defaultDataSocket() string {
 	return filepath.Join(dir, configdir.Name, "identity", "run", "data.sock")
 }
 
+// A service manager can return from start before the daemon binds its sockets.
+// Retry only before a connection was made, so a pairing request is sent once.
+func waitForDaemon[T any](connect func() (T, error)) (T, error) {
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		result, err := connect()
+		var op *net.OpError
+		missing := errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
+		if !missing || (errors.As(err, &op) && op.Op != "dial") || !time.Now().Before(deadline) {
+			return result, err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // bridgeStream copies binary frames without writing diagnostics to stdout.
 func bridgeStream(socketPath string, input io.Reader, output io.Writer) error {
-	conn, err := node.DialDataSocket(socketPath)
+	conn, err := waitForDaemon(func() (net.Conn, error) { return node.DialDataSocket(socketPath) })
 	if err != nil {
 		return fmt.Errorf("server_unavailable: daemon data socket unavailable")
 	}
@@ -204,7 +219,16 @@ func run(args []string) error {
 				return err
 			}
 		}
-		raw, err := node.ControlRequestFields(*ipc, map[string]string{"method": method, "endpoint": *endpoint, "pin": *pin})
+		request := func() (json.RawMessage, error) {
+			return node.ControlRequestFields(*ipc, map[string]string{"method": method, "endpoint": *endpoint, "pin": *pin})
+		}
+		var raw json.RawMessage
+		var err error
+		if method == "pair_tcp" {
+			raw, err = waitForDaemon(request)
+		} else {
+			raw, err = request()
+		}
 		if err != nil {
 			return err
 		}

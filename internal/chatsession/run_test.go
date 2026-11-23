@@ -153,9 +153,10 @@ func TestRuntimeUsesSummaryAndRejectsUnsupportedHistory(t *testing.T) {
 }
 
 func TestStoredRuntimePersistsChatButNotTransientCredentials(t *testing.T) {
+	const headerSecret = "private-provider-header-sentinel"
 	seenInstruction := make(chan bool, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer stored-sentinel" {
+		if r.Header.Get("Authorization") != "Bearer stored-sentinel" || r.Header.Get("X-Provider-Key") != headerSecret {
 			http.Error(w, "unauthorized", 401)
 			return
 		}
@@ -172,18 +173,17 @@ func TestStoredRuntimePersistsChatButNotTransientCredentials(t *testing.T) {
 	}))
 	defer upstream.Close()
 	dir := filepath.Join(t.TempDir(), "data")
-	docs := map[string]string{"providers.yaml": fmt.Sprintf("schema_version: 1\nrevision: 1\ngroups: []\nproviders:\n  - id: p\n    name: P\n    type: openai\n    baseUrl: %s\n    auth:\n      method: bearer_token\n      credential_ref: provider/p/main\n    config: {}\n", upstream.URL), "models.yaml": "schema_version: 1\nrevision: 1\nproviders:\n  p:\n    modelIds: [test]\n    modelConfigs: {}\n    catalog: []\n", "mcp.yaml": "schema_version: 1\nrevision: 1\nservers: []\n", "profiles.yaml": "schema_version: 1\nrevision: 1\nchatProfiles: []\n"}
-	if _, err := catalog.New(dir).Save(0, docs); err != nil {
+	store := catalog.New(dir)
+	payload := fmt.Sprintf(`{"id":"p","name":"Provider","type":"openai","baseUrl":%q,
+		"auth":{"method":"bearer_token","value":"stored-sentinel"},
+		"config":{"modelIds":["test"],"headers":{"X-Provider-Key":%q}}}`, upstream.URL, headerSecret)
+	if err := store.ImportMobile("provider", json.RawMessage(payload)); err != nil {
 		t.Fatal(err)
 	}
-	store, err := secrets.Open(dir)
-	if err != nil {
-		t.Fatal(err)
+	bundle, err := store.Get()
+	if err != nil || strings.Contains(bundle.Files["providers.yaml"], headerSecret) {
+		t.Fatal("plaintext header in catalog", err)
 	}
-	if err = store.Put("provider", "p", "main", "", "api_key", []byte("stored-sentinel")); err != nil {
-		t.Fatal(err)
-	}
-	store.Close()
 	before, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -212,6 +212,10 @@ func TestStoredRuntimePersistsChatButNotTransientCredentials(t *testing.T) {
 		}
 		for _, e := range events {
 			cursor = e.Seq
+			encoded, _ := json.Marshal(e)
+			if strings.Contains(string(encoded), headerSecret) {
+				t.Fatal("plaintext header in event")
+			}
 			if e.Kind == "error" {
 				t.Fatalf("run: %+v", e)
 			}
@@ -245,7 +249,7 @@ func TestStoredRuntimePersistsChatButNotTransientCredentials(t *testing.T) {
 	if err != nil || selected.ProviderID != "p" || selected.ModelID != "test" {
 		t.Fatalf("stored provider/model selection not persisted: %+v %v", selected, err)
 	}
-	if err != nil || !strings.Contains(string(snap.Conversation), "ok") || strings.Contains(string(snap.Conversation), "stored-sentinel") || strings.Contains(string(snap.Conversation), "Instruction test") {
+	if err != nil || !strings.Contains(string(snap.Conversation), "ok") || strings.Contains(string(snap.Conversation), "stored-sentinel") || strings.Contains(string(snap.Conversation), headerSecret) || strings.Contains(string(snap.Conversation), "Instruction test") {
 		t.Fatalf("chat persistence or leaked credential: %+v %v", snap, err)
 	}
 }

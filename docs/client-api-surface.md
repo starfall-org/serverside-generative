@@ -35,7 +35,7 @@ Every ServerSide session uses durable chat storage. Provider/MCP credentials **s
 | `GET /v1/events?session_id=...&after=...` | Server events by SSE (default) or JSON long poll (`Accept: application/json`) | Same bearer |
 | `GET /v1/ws` | Full-duplex JSON RPC and events | WS `auth` text frame first |
 | TLS/TCP | Length-prefixed JSON frames (4-byte big-endian size) | SSH-enrolled TCP identity |
-| `generative stream --stdio` | Same framed RPC via SSH + private daemon socket | SSH-enrolled TCP identity |
+| `generative stream --stdio` | Same framed RPC via SSH and a private daemon socket on Linux and macOS | SSH-enrolled TCP identity |
 
 Public HTTP requires correctly configured TLS/reverse proxy. Plaintext HTTP data API is allowed only on loopback, under the server's security policy. `/connect` serves the embedded developer console. Browsers cannot verify the invitation SPKI pin; verify the HTTPS certificate independently before redeeming the code.
 
@@ -146,7 +146,7 @@ The event's `conversation.messages` is illustrative here. In reality it contains
 | `session.run` / `session.cancel` | Start one request and optionally cancel by `request_id` |
 | `session.get` | Full server conversation + `revision`; accepts `if_revision` and may return `unchanged` |
 | `session.events` | Events after the requested `after` sequence |
-| `session.save` | Explicit full chat edit; `expected_revision` and `idempotency_key` for atomic CAS |
+| `session.save` | Full chat edit with atomic CAS via `expected_revision` and `idempotency_key`. An idempotent replay of the last save in the same live session retains its event cursor. |
 | `identity.revoke` | Authenticated, self-only v5 RPC revocation for TCP/SSH-stdio pairing. Send no `data`; success returns `{ "revoked": true }`. Revocation ends future access under this identity but retains server history. Do not replay after an uncertain response. |
 | `session.list` | Stored owner-scoped chats and tombstones (persistent across restart) |
 | `session.close` | Release RAM runtime only, **not** history |
@@ -306,12 +306,18 @@ secret store and publishes the corresponding catalog record with revision CAS;
 it does not replace an existing ID. The provider's model IDs and model
 configuration are written to the model catalog; device-local folder membership
 is not transferred. The client should refresh the inventory after import.
+Key labels can be omitted. Providers using platform-default authentication can
+use an explicitly selected key from the imported key list without a primary key.
+Custom model discovery URLs stay in the catalog and are unused by generation
+when a model ID has already been selected.
 `mcp.catalog` returns a list of nonsecret objects with `id`, `name` and
 `protocol`. Neither import responses nor MCP inventory contain credentials.
-MCP extra HTTP headers and URL query strings use an encrypted connection
-reference; bearer, custom-header and query-parameter authentication are resolved
-from encrypted references. OAuth account/token migration and provider-specific
-private headers/proxies are not supported by this import contract and fail
-closed rather than silently losing data. The existing server runtime adapter
-limitations still apply. Failed catalog CAS can leave unreferenced encrypted
-credentials, as with existing CLI credential updates.
+Provider and MCP extra HTTP headers use encrypted connection references. MCP
+URL query strings are also encrypted. Bearer, custom-header and query-parameter
+authentication are resolved from encrypted references. Provider headers are
+applied to the selected upstream request. The server rejects duplicates and
+transport-controlled headers. OAuth account/token migration, provider proxies
+and provider URLs with query strings or embedded credentials remain unsupported.
+The existing server runtime adapter limitations still apply. Failed catalog CAS
+can leave unreferenced encrypted credentials, as with existing CLI credential
+updates.

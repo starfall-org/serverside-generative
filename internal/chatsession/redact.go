@@ -58,6 +58,9 @@ func runtimeSecrets(raw json.RawMessage) []string {
 					if sensitive {
 						add(str)
 					}
+					if parent == "headers" {
+						add(strings.Trim(str, " \t"))
+					}
 					if strings.HasPrefix(strings.ToLower(str), "https://") || strings.HasPrefix(strings.ToLower(str), "http://") {
 						if u, err := url.Parse(str); err == nil {
 							if u.User != nil {

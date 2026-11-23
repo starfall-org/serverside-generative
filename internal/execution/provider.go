@@ -20,14 +20,15 @@ import (
 // Configuration is supplied by the paired Android client during handoff.
 // Never write this structure to a file, environment variable, or log.
 type State struct {
-	HTTPClient       *http.Client `json:"-"`
-	WireAuthMethod   string       `json:"-"`
-	WireAuthKey      string       `json:"-"`
-	WireAuthValue    string       `json:"-"`
-	Provider         Provider     `json:"provider"`
-	Conversation     []Message    `json:"conversation"`
-	MCP              []MCPServer  `json:"mcp,omitempty"`
-	SelectedSkillIDs []string     `json:"selected_skill_ids,omitempty"`
+	HTTPClient       *http.Client      `json:"-"`
+	WireAuthMethod   string            `json:"-"`
+	WireAuthKey      string            `json:"-"`
+	WireAuthValue    string            `json:"-"`
+	WireHeaders      map[string]string `json:"-"`
+	Provider         Provider          `json:"provider"`
+	Conversation     []Message         `json:"conversation"`
+	MCP              []MCPServer       `json:"mcp,omitempty"`
+	SelectedSkillIDs []string          `json:"selected_skill_ids,omitempty"`
 }
 type Provider struct {
 	ID          string   `json:"id,omitempty"`

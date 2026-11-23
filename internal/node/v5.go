@@ -243,7 +243,7 @@ func (n *Node) capabilities() map[string]any {
 					"anthropic":        map[string]any{"parameters": []string{"max_tokens"}},
 					"google":           map[string]any{"parameters": []string{"max_tokens", "temperature", "top_p", "top_k"}},
 				},
-				"stored_runtime": map[string]any{"requires_provider_and_model": true, "explicit_key_selection_when_configured": true, "credential_values_returned": false},
+				"stored_runtime": map[string]any{"requires_provider_and_model": true, "explicit_key_selection_when_configured": true, "credential_values_returned": false, "private_provider_headers": true},
 			},
 		},
 	}

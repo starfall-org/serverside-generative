@@ -104,8 +104,10 @@ supported records. Existing IDs are not overwritten. Android discovers these
 operations via capabilities.
 
 **Outstanding:** migrating OAuth adapter token stores and supporting imported
-provider-specific private headers, proxy settings and private provider URLs
-requires additional server runtime support. Unsupported records fail closed.
+proxy settings and private provider URLs requires additional server runtime
+support. Provider-specific HTTP headers are now stored in the encrypted
+credential store and applied to requests by the stored provider runtime.
+Unsupported records fail closed.
 Live-device testing and deployment remain outstanding. OpenCode provider
 import has no verified public write API; its MCP add API is runtime-only.
 

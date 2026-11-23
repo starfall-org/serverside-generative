@@ -86,6 +86,37 @@ func TestWrongKeyRejected(t *testing.T) {
 	}
 }
 
+func TestOpenRecoversEmptyDatabaseButRequiresCheckForExistingSchema(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "master.key"), bytes.Repeat([]byte{7}, 32), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "data.sqlite")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatalf("retry after interrupted first initialization: %v", err)
+	}
+	if err = store.Put("provider", "p", "key", "", "api_key", []byte("credential")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.db.Exec(`DELETE FROM master_key_check WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if store, err = Open(dir); err == nil {
+		_ = store.Close()
+		t.Fatal("existing schema without a key check was accepted")
+	}
+}
+
 func TestReadOnlyDoesNotCreateFiles(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {

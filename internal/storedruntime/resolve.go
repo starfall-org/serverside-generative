@@ -32,10 +32,11 @@ func Resolve(dir string, raw json.RawMessage) (json.RawMessage, error) {
 		return nil, err
 	}
 	type providerRecord struct {
-		ID      string `yaml:"id"`
-		Type    string `yaml:"type"`
-		BaseURL string `yaml:"baseUrl"`
-		Auth    struct {
+		ID            string `yaml:"id"`
+		Type          string `yaml:"type"`
+		BaseURL       string `yaml:"baseUrl"`
+		ConnectionRef string `yaml:"connection_ref"`
+		Auth          struct {
 			Method        string `yaml:"method"`
 			CredentialRef string `yaml:"credential_ref"`
 			ParameterName string `yaml:"parameter_name"`
@@ -129,19 +130,9 @@ func Resolve(dir string, raw json.RawMessage) (json.RawMessage, error) {
 		}
 	}
 	if p.Auth.Method != "none" {
-		prefix := "provider/" + request.ProviderID + "/"
-		if !strings.HasPrefix(ref, prefix) || len(ref) == len(prefix) {
-			return nil, ErrAuth
-		}
-		keyID := strings.TrimPrefix(ref, prefix)
-		store, err := secrets.OpenReadOnly(dir)
+		value, err := providerCredential(dir, request.ProviderID, ref)
 		if err != nil {
-			return nil, ErrAuth
-		}
-		value, err := store.Get("provider", request.ProviderID, keyID)
-		closeErr := store.Close()
-		if err != nil || closeErr != nil || len(value) == 0 {
-			return nil, ErrAuth
+			return nil, err
 		}
 		auth["value"] = string(value)
 	}
@@ -149,12 +140,31 @@ func Resolve(dir string, raw json.RawMessage) (json.RawMessage, error) {
 	// only way to choose one; never silently pick the first or another provider.
 	delete(config, "apiKeys")
 	delete(config, "multipleApiKeys")
+	// Discovery URLs are catalog metadata. The chat adapter already has the
+	// chosen model ID and only needs settings that affect a generation request.
+	delete(config, "customListModelsUrl")
+	if endpoints, ok := config["customEndpoints"].(map[string]any); ok {
+		delete(endpoints, "catalog")
+	}
 	if model.ModelIDs != nil {
 		config["modelIds"] = *model.ModelIDs
 	} else {
 		config["modelIds"] = nil
 	}
 	provider := map[string]any{"id": p.ID, "type": p.Type, "baseUrl": p.BaseURL, "modelId": request.ModelID, "auth": auth, "config": config}
+	if p.ConnectionRef != "" {
+		value, err := providerCredential(dir, request.ProviderID, p.ConnectionRef)
+		if err != nil {
+			return nil, err
+		}
+		var private struct {
+			Headers map[string]string `json:"headers"`
+		}
+		if json.Unmarshal(value, &private) != nil || len(private.Headers) == 0 || !execution.ValidProviderHeaders(private.Headers) {
+			return nil, ErrAuth
+		}
+		provider["headers"] = private.Headers
+	}
 	if m, ok := model.ModelConfigs[request.ModelID]; ok {
 		provider["modelConfig"] = m
 	}
@@ -163,4 +173,22 @@ func Resolve(dir string, raw json.RawMessage) (json.RawMessage, error) {
 		return nil, ErrUnsupported
 	}
 	return encoded, nil
+}
+
+func providerCredential(dir, providerID, ref string) ([]byte, error) {
+	prefix := "provider/" + providerID + "/"
+	keyID, ok := strings.CutPrefix(ref, prefix)
+	if !ok || keyID == "" {
+		return nil, ErrAuth
+	}
+	store, err := secrets.OpenReadOnly(dir)
+	if err != nil {
+		return nil, ErrAuth
+	}
+	value, err := store.Get("provider", providerID, keyID)
+	closeErr := store.Close()
+	if err != nil || closeErr != nil || len(value) == 0 {
+		return nil, ErrAuth
+	}
+	return value, nil
 }

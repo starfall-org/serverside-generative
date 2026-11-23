@@ -373,9 +373,11 @@ func (m *Manager) saveBounded(owner, id, requestID string, expected uint64, conv
 	if err != nil {
 		return View{}, err
 	}
-	s.conversation = clone(snap.Conversation)
-	s.revision = snap.Revision
-	m.emitConversation(s, id, requestID)
+	if snap.Revision != s.revision {
+		s.conversation = clone(snap.Conversation)
+		s.revision = snap.Revision
+		m.emitConversation(s, id, requestID)
+	}
 	m.touch(id, s)
 	return view(id, s), nil
 }
