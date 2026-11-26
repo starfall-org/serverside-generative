@@ -70,6 +70,14 @@ func TestHTTPPairingIsScopedBoundAndSingleUse(t *testing.T) {
 		return response, result
 	}
 	code := issue()
+	page, err := server.Client().Get(server.URL + "/connect#code=" + url.QueryEscape(code))
+	if err != nil {
+		t.Fatal(err)
+	}
+	page.Body.Close()
+	if page.StatusCode != 200 {
+		t.Fatal("invitation landing page failed", page.StatusCode)
+	}
 	if response, _ := post(code, "other.invalid", ""); response.StatusCode != 401 {
 		t.Fatalf("wrong host: %d", response.StatusCode)
 	}

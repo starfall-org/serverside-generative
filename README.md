@@ -25,7 +25,7 @@ The server needs a reachable SSH service for SSH pairing or fallback; it does **
 
 ### Persistence and features
 
-- `~/.config/generative/identity/`: TLS certificate/key, per-client secret hashes, Unix `control.sock` and daemon `run/data.sock` (private filesystem permissions).
+- `~/.config/generative/identity/`: TLS certificate/key, per-client secret hashes, web password hash and session digests, Unix `control.sock` and daemon `run/data.sock` (private filesystem permissions).
 - `~/.config/generative/` (or `XDG_CONFIG_HOME/generative/`): revisioned nonsecret `providers.yaml`, `models.yaml`, `mcp.yaml`, `profiles.yaml`; encrypted secret/custom-tool SQLite; **`chats/*.json` for every v5 conversation**. Existing `shared-config.json` remains available for old clients until explicitly migrated.
 - OAuth login/refresh, image/video/music binary generation/file storage, and other unsupported adapters are not silently implemented. Unsupported operations return explicit errors.
 - Terminal and coding-agent RPC operations are **opt-in** via `--enable-terminal` / `--enable-agent`; authorization is independent from ordinary model tools.
@@ -33,11 +33,33 @@ The server needs a reachable SSH service for SSH pairing or fallback; it does **
 
 ## Web chat client
 
-The HTTP listener serves the embedded chat client at `/` and `/connect`. Start `generative serve`, then run `generative pair --stdio --transport http-local` on the server and enter the one-time code at `http://127.0.0.1:7091/`. The code is redeemable only from the local machine. The browser stores the paired credential in local storage so it can reopen the same chat history; disconnecting clears it. Use a trusted browser profile.
+With the default `generative serve` settings, open `http://127.0.0.1:7091/` on the server machine. The web workspace opens directly when the web password is unset. The daemon warns on stderr at every startup with the web listener enabled in this mode. Anyone who can reach a passwordless endpoint can use the workspace. Loopback access does not identify an OS user. Keep direct loopback listeners out of reverse proxies and tunnels. A proxy that rewrites the backend Host and strips every forwarding header can be indistinguishable from a local process.
 
-Select a server-managed provider/model or enter temporary provider credentials in the Model settings. Chats are stored on the server. Temporary provider credentials stay in browser and server memory. To access the web client remotely, use the HTTPS pairing URL and a trusted reverse proxy; the browser cannot independently verify the SPKI pin shown in the invitation.
+To require a password, run this command under the daemon's OS account while it is running. The prompt hides input. For automation, `--stdin` reads one password from private stdin. Use `--ipc PATH` with a custom control socket.
 
-The built client is checked in under `internal/node/web` and embedded in the Go binary. To modify it, run `npm ci --prefix web`, `npm run build --prefix web`, then `go build -o generative ./cmd/generative`.
+```sh
+generative web password set
+```
+
+Use `generative web password reset` to replace the saved password, `generative web password unset` to remove it, and `generative web sessions revoke-all` to revoke sessions independently. An effective password change revokes existing sessions, including any previously bootstrapped without a password. The daemon keeps salted Argon2id verifiers and session digests in `identity/web-auth.json` (mode `0600`). Argon2id uses 64 MiB, 3 passes, 1 lane, a 128-bit salt and a 256-bit output. Only one derivation runs at a time. [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#argon2id)
+
+The startup precedence is **explicit `--web-password`**, then **`GENERATIVE_WEB_PASSWORD`**, then the **saved password**, then **passwordless mode**. Explicit empty values are rejected. Both overrides apply only to the running daemon. The private session store keeps a salted verifier to recognize an unchanged override on restart. A saved-password set, reset or unset under an override updates the saved fallback. Change or remove the override and restart to change the effective password. A password flag can be exposed in process listings and shell history. An environment variable can be visible to privileged processes. Prefer the interactive password command or a protected service environment. The service installer rejects password flags in saved service arguments.
+
+For remote browsers, use a dedicated HTTPS hostname, set the exact browser origin, and specify the trusted TLS proxy's source IP. Keep the backend bound to loopback.
+
+```sh
+generative serve --http-listen 127.0.0.1:7091 --web-origin https://chat.example.com --web-trusted-proxy 127.0.0.1
+```
+
+The proxy must terminate HTTPS, enforce the configured authority, preserve the public upstream `Host` (including a nondefault port), and overwrite `X-Forwarded-Proto` with `https` on requests received over TLS. Redirect or reject incoming HTTP at the proxy. Keep SSE unbuffered and allow long requests on `/web/events`. Forward `/connect` and the existing `/v1/*` routes if you use mobile HTTP/WS pairing on this host. HTTPS web access requires a password by default. `--allow-public-web-without-password` explicitly opens the configured HTTPS origin to anyone who can reach it and triggers an additional startup warning.
+
+Browser sessions survive reload and daemon restart when the effective password and mode stay the same. They expire after 24 hours without authenticated RPC activity or 7 days from issuance, whichever comes first. Direct loopback HTTP uses a separate cookie without the HTTPS Secure flag.
+
+The web workspace has one stable owner. Signing out, resetting the password and restarting preserve its history. Mobile devices and browsers paired through the old console keep their own credentials and durable history. To access or export old browser history, use an existing authenticated client or a trusted previous console build with the existing browser credential for the original origin. In an authenticated v5 client, use `session.list`, then `session.open` to export a conversation (or the chunked read operations for large histories). The server administrator can also list and export these chats using `generative chat list --client-id OLD_ID` and `generative chat export --client-id OLD_ID --id CHAT_ID --out PATH`. The previous browser stored its client ID under `generative.identity.v1.<origin>`. Preserve that credential privately if you still need the old flow. A cross-owner migration is currently unavailable.
+
+Select a server-managed provider/model or enter temporary provider credentials in Model settings. Chats are stored on the server. Temporary provider credentials stay in memory. The daemon releases the web workspace runtime when its last browser session signs out or an administrator revokes every session. Native terminal and coding-agent access continues to use paired clients and the existing server opt-ins. A mobile pairing invitation opened at `/connect` leaves the invitation available for the mobile client to redeem.
+
+The built client is checked in under `internal/node/web` and embedded in the Go binary. To modify it, run `npm ci --prefix web`, `npm run build --prefix web`, then `go build -o generative ./cmd/generative`. The browser tests run against a temporary daemon, HTTPS proxy and fake provider. With Go and OpenSSL installed, run `cd web && npx playwright install chromium && npm run e2e`.
 
 ## Install (no Go toolchain required on the deployed server)
 
@@ -69,6 +91,8 @@ generative service start
 generative service restart
 generative service uninstall
 ```
+
+For web access, append the appropriate `--web-origin` and, for an HTTPS proxy, `--web-trusted-proxy` flags to the service install command. The default loopback service opens passwordless and logs the startup warning. To enable protection, run `generative web password set` under the service account or set `GENERATIVE_WEB_PASSWORD` through the service manager’s protected environment. A shell environment is inherited only if the launcher passes it to the daemon. The private configuration directory holds web credentials and sessions across service restarts.
 
 On startup, the daemon initializes a fresh empty YAML catalog and encrypted database automatically; existing incomplete or corrupt catalogs are not overwritten. The installer automatically installs and starts the service for the current user, without root privileges, when installing a release that includes the service commands. Additional installer arguments are passed to `serve`. To install only the binary without registering or starting the service, run `SERVERSIDE_INSTALL_SERVICE=0 sh install-generative.sh`.
 Existing installations must migrate the two old directories before starting the new daemon. Record the current serve flags, stop any manually started daemon, and uninstall the old managed service using the old executable. Back up the old directories before relocation (do not run this while the daemon or any CLI writer is running):

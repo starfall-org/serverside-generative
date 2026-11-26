@@ -34,7 +34,7 @@ func TestLaunchPlist(t *testing.T) {
 }
 func TestRejectPasswordAndNewlines(t *testing.T) {
 	c := config{Backend: "native", Executable: "/a", CWD: "/b"}
-	for _, arg := range []string{"--password", "-password=secret", "--password=secret", "x\ny", "x\x00y"} {
+	for _, arg := range []string{"--password", "-password=secret", "--password=secret", "--web-password", "-web-password=secret", "--web-password=secret", "x\ny", "x\x00y"} {
 		c.Args = []string{arg}
 		if validate(c) == nil {
 			t.Fatalf("accepted %q", arg)

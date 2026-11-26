@@ -15,7 +15,7 @@ func TestEmbeddedWeb(t *testing.T) {
 	for _, path := range []string{"/", "/connect"} {
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, httptest.NewRequest("GET", path, nil))
-		if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "ServerSide Studio") {
+		if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "Generative") {
 			t.Fatalf("%s: %d %s", path, rr.Code, rr.Body.String())
 		}
 		if rr.Header().Get("Content-Security-Policy") == "" || rr.Header().Get("Cache-Control") != "no-store" {

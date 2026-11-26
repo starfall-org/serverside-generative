@@ -249,6 +249,25 @@ func (n *Node) capabilities() map[string]any {
 	}
 }
 
+func webRPCAllowed(op string) bool {
+	return op != "identity.revoke" && !strings.HasPrefix(op, "terminal.") && !strings.HasPrefix(op, "agent.")
+}
+
+func webCapabilities(data map[string]any) {
+	operations := data["operations"].([]string)
+	webOperations := operations[:0]
+	for _, op := range operations {
+		if webRPCAllowed(op) {
+			webOperations = append(webOperations, op)
+		}
+	}
+	data["operations"] = webOperations
+	data["native_terminal"] = false
+	data["native_agent"] = false
+	data["transports"] = []string{"http"}
+	data["chat_features"].(map[string]any)["workspace_scope"] = "web_workspace"
+}
+
 // readRPCBody applies the same size limit and error mapping to HTTP RPC inputs.
 func readRPCBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
@@ -332,189 +351,17 @@ func (n *Node) registerV5(mux *http.ServeMux) {
 		}
 		jsonReply(w, 200, map[string]any{"token": token, "expires_in": 900, "client_id": id})
 	})
-	mux.HandleFunc("POST /v1/rpc", func(w http.ResponseWriter, r *http.Request) {
-		if !secureDataRequest(r) {
-			rpcHTTPError(w, 403, "forbidden", "TLS required")
-			return
-		}
-		owner := n.bearer(r)
-		if owner == "" {
-			rpcHTTPError(w, 401, "unauthorized", "Authentication required")
-			return
-		}
-		raw, ok := readRPCBody(w, r, maxFrame)
-		if !ok {
-			return
-		}
-		req, err := rpc.Decode(raw)
-		if err != nil {
-			rpcHTTPError(w, 400, "invalid_request", "Invalid request")
-			return
-		}
-		reply := n.rpc.Dispatch(owner, req)
-		status := 200
-		if !reply.OK {
-			switch reply.Error.Code {
-			case "not_found":
-				status = 404
-			case "revision_conflict", "session_busy", "event_gap", "request_already_recorded", "session_deleted":
-				status = 409
-			case "invalid_request", "missing_runtime_config":
-				status = 400
-			case "unauthorized", "auth_required":
-				status = 401
-			case "permission_denied", "forbidden", "secret_leak_blocked":
-				status = 403
-			case "resource_exhausted":
-				status = 429
-			case "internal_error":
-				status = 500
-			default:
-				status = 501
-			}
-		}
-		jsonReply(w, status, reply)
-	})
-	mux.HandleFunc("GET /v1/events", func(w http.ResponseWriter, r *http.Request) {
-		if !secureDataRequest(r) {
-			rpcHTTPError(w, 403, "forbidden", "TLS required")
-			return
-		}
-		owner := n.bearer(r)
-		if owner == "" {
-			rpcHTTPError(w, 401, "unauthorized", "Authentication required")
-			return
-		}
-		id := r.URL.Query().Get("session_id")
-		after := uint64(0)
-		if v := r.URL.Query().Get("after"); v != "" {
-			var err error
-			after, err = strconv.ParseUint(v, 10, 64)
-			if err != nil {
-				rpcHTTPError(w, 400, "invalid_request", "Invalid cursor")
+	secure := func(handler http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !secureDataRequest(r) {
+				rpcHTTPError(w, 403, "forbidden", "TLS required")
 				return
 			}
+			handler(w, r)
 		}
-		ch, cancel, err := n.rpc.Subscribe(owner, id)
-		if err != nil {
-			if n.bearer(r) == "" {
-				rpcHTTPError(w, 401, "unauthorized", "Authentication required")
-				return
-			}
-			failure := subscriptionFailure("", err)
-			status := http.StatusNotFound
-			if failure.Error.Code == "resource_exhausted" {
-				status = http.StatusTooManyRequests
-			}
-			jsonReply(w, status, failure)
-			return
-		}
-		defer cancel()
-		events, err := n.rpc.Events(owner, id, after)
-		if err != nil {
-			if n.bearer(r) == "" {
-				rpcHTTPError(w, 401, "unauthorized", "Authentication required")
-				return
-			}
-			status, code, message := eventFailure(err)
-			rpcHTTPError(w, status, code, message)
-			return
-		}
-		if strings.Contains(r.Header.Get("Accept"), "application/json") {
-			if len(events) == 0 {
-				timer := time.NewTimer(20 * time.Second)
-				defer timer.Stop()
-				select {
-				case <-ch:
-					events, err = n.rpc.Events(owner, id, after)
-				case <-timer.C:
-				case <-r.Context().Done():
-					return
-				}
-				if n.bearer(r) == "" {
-					rpcHTTPError(w, 401, "unauthorized", "Authentication required")
-					return
-				}
-				if err != nil {
-					status, code, message := eventFailure(err)
-					rpcHTTPError(w, status, code, message)
-					return
-				}
-			}
-			if n.bearer(r) == "" {
-				rpcHTTPError(w, 401, "unauthorized", "Authentication required")
-				return
-			}
-			jsonReply(w, 200, map[string]any{"events": events})
-			return
-		}
-		controller := http.NewResponseController(w)
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			rpcHTTPError(w, 500, "internal_error", "Streaming unavailable")
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("X-Accel-Buffering", "no")
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
-		for {
-			for _, event := range events {
-				_ = controller.SetWriteDeadline(time.Now().Add(20 * time.Second))
-				b, _ := json.Marshal(event)
-				if _, err = fmt.Fprintf(w, "id: %d\ndata: %s\n\n", event.Seq, b); err != nil {
-					return
-				}
-				after = event.Seq
-			}
-			flusher.Flush()
-			if len(events) > 0 {
-				if n.bearer(r) == "" {
-					return
-				}
-				events, err = n.rpc.Events(owner, id, after)
-				if err != nil {
-					if n.bearer(r) == "" {
-						return
-					}
-					_, code, _ := eventFailure(err)
-					fmt.Fprintf(w, "event: error\ndata: {\"code\":%q}\n\n", code)
-					flusher.Flush()
-					return
-				}
-				continue
-			}
-			select {
-			case <-ch:
-				if n.bearer(r) == "" {
-					return
-				}
-				events, err = n.rpc.Events(owner, id, after)
-				if err != nil {
-					if n.bearer(r) == "" {
-						return
-					}
-					_, code, _ := eventFailure(err)
-					fmt.Fprintf(w, "event: error\ndata: {\"code\":%q}\n\n", code)
-					flusher.Flush()
-					return
-				}
-			case <-ticker.C:
-				if n.bearer(r) == "" {
-					return
-				}
-				_ = controller.SetWriteDeadline(time.Now().Add(20 * time.Second))
-				if _, err = fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
-					return
-				}
-				flusher.Flush()
-				events = nil
-			case <-r.Context().Done():
-				return
-			}
-		}
-	})
+	}
+	mux.HandleFunc("POST /v1/rpc", secure(n.rpcHTTP(n.bearer, nil)))
+	mux.HandleFunc("GET /v1/events", secure(n.eventsHTTP(n.bearer)))
 
 	mux.HandleFunc("GET /v1/ws", func(w http.ResponseWriter, r *http.Request) {
 		if !secureDataRequest(r) {
@@ -610,4 +457,202 @@ func (n *Node) registerV5(mux *http.ServeMux) {
 			}
 		}
 	})
+}
+
+func (n *Node) rpcHTTP(principal, confirm func(*http.Request) string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		owner := principal(r)
+		if owner == "" {
+			rpcHTTPError(w, 401, "unauthorized", "Authentication required")
+			return
+		}
+		raw, ok := readRPCBody(w, r, maxFrame)
+		if !ok {
+			return
+		}
+		req, err := rpc.Decode(raw)
+		if err != nil {
+			rpcHTTPError(w, 400, "invalid_request", "Invalid request")
+			return
+		}
+		if confirm != nil && confirm(r) != owner {
+			rpcHTTPError(w, 401, "unauthorized", "Authentication required")
+			return
+		}
+		if owner == webOwner && !webRPCAllowed(req.Op) {
+			jsonReply(w, 403, rpc.Reply{ID: req.ID, Error: &rpc.Error{Code: "permission_denied", Message: "Operation requires a paired client"}})
+			return
+		}
+		reply := n.rpc.Dispatch(owner, req)
+		if owner == webOwner && req.Op == "capabilities.get" && reply.OK {
+			webCapabilities(reply.Data.(map[string]any))
+		}
+		status := 200
+		if !reply.OK {
+			switch reply.Error.Code {
+			case "not_found":
+				status = 404
+			case "revision_conflict", "session_busy", "event_gap", "request_already_recorded", "session_deleted":
+				status = 409
+			case "invalid_request", "missing_runtime_config":
+				status = 400
+			case "unauthorized", "auth_required":
+				status = 401
+			case "permission_denied", "forbidden", "secret_leak_blocked":
+				status = 403
+			case "resource_exhausted":
+				status = 429
+			case "internal_error":
+				status = 500
+			default:
+				status = 501
+			}
+		}
+		jsonReply(w, status, reply)
+	}
+}
+
+func (n *Node) eventsHTTP(principal func(*http.Request) string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		owner := principal(r)
+		if owner == "" {
+			rpcHTTPError(w, 401, "unauthorized", "Authentication required")
+			return
+		}
+		id := r.URL.Query().Get("session_id")
+		after := uint64(0)
+		if v := r.URL.Query().Get("after"); v != "" {
+			var err error
+			after, err = strconv.ParseUint(v, 10, 64)
+			if err != nil {
+				rpcHTTPError(w, 400, "invalid_request", "Invalid cursor")
+				return
+			}
+		}
+		ch, cancel, err := n.rpc.Subscribe(owner, id)
+		if err != nil {
+			if principal(r) == "" {
+				rpcHTTPError(w, 401, "unauthorized", "Authentication required")
+				return
+			}
+			failure := subscriptionFailure("", err)
+			status := http.StatusNotFound
+			if failure.Error.Code == "resource_exhausted" {
+				status = http.StatusTooManyRequests
+			}
+			jsonReply(w, status, failure)
+			return
+		}
+		defer cancel()
+		events, err := n.rpc.Events(owner, id, after)
+		if err != nil {
+			if principal(r) == "" {
+				rpcHTTPError(w, 401, "unauthorized", "Authentication required")
+				return
+			}
+			status, code, message := eventFailure(err)
+			rpcHTTPError(w, status, code, message)
+			return
+		}
+		if strings.Contains(r.Header.Get("Accept"), "application/json") {
+			if len(events) == 0 {
+				timer := time.NewTimer(20 * time.Second)
+				defer timer.Stop()
+				select {
+				case <-ch:
+					events, err = n.rpc.Events(owner, id, after)
+				case <-timer.C:
+				case <-r.Context().Done():
+					if owner == webOwner && principal(r) == "" {
+						rpcHTTPError(w, 401, "unauthorized", "Authentication required")
+					}
+					return
+				}
+				if principal(r) == "" {
+					rpcHTTPError(w, 401, "unauthorized", "Authentication required")
+					return
+				}
+				if err != nil {
+					status, code, message := eventFailure(err)
+					rpcHTTPError(w, status, code, message)
+					return
+				}
+			}
+			if principal(r) == "" {
+				rpcHTTPError(w, 401, "unauthorized", "Authentication required")
+				return
+			}
+			jsonReply(w, 200, map[string]any{"events": events})
+			return
+		}
+		controller := http.NewResponseController(w)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			rpcHTTPError(w, 500, "internal_error", "Streaming unavailable")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Accel-Buffering", "no")
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			for _, event := range events {
+				if r.Context().Err() != nil || (owner == webOwner && principal(r) == "") {
+					return
+				}
+				_ = controller.SetWriteDeadline(time.Now().Add(20 * time.Second))
+				b, _ := json.Marshal(event)
+				if _, err = fmt.Fprintf(w, "id: %d\ndata: %s\n\n", event.Seq, b); err != nil {
+					return
+				}
+				after = event.Seq
+			}
+			flusher.Flush()
+			if len(events) > 0 {
+				if principal(r) == "" {
+					return
+				}
+				events, err = n.rpc.Events(owner, id, after)
+				if err != nil {
+					if principal(r) == "" {
+						return
+					}
+					_, code, _ := eventFailure(err)
+					fmt.Fprintf(w, "event: error\ndata: {\"code\":%q}\n\n", code)
+					flusher.Flush()
+					return
+				}
+				continue
+			}
+			select {
+			case <-ch:
+				if principal(r) == "" {
+					return
+				}
+				events, err = n.rpc.Events(owner, id, after)
+				if err != nil {
+					if principal(r) == "" {
+						return
+					}
+					_, code, _ := eventFailure(err)
+					fmt.Fprintf(w, "event: error\ndata: {\"code\":%q}\n\n", code)
+					flusher.Flush()
+					return
+				}
+			case <-ticker.C:
+				if principal(r) == "" {
+					return
+				}
+				_ = controller.SetWriteDeadline(time.Now().Add(20 * time.Second))
+				if _, err = fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+					return
+				}
+				flusher.Flush()
+				events = nil
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}
 }

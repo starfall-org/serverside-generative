@@ -12,17 +12,20 @@ flowchart LR
     WS["WSS /v1/ws : JSON"]
     HTTP["HTTPS /v1/rpc + /v1/events"]
     RPC["One v5 dispatcher"]
+    Browser["Embedded browser workspace"]
+    Web["HTTPS /web/rpc + /web/events"]
     Runtime["Active sessions +<br/>ephemeral provider/MCP RAM"]
     Chat[("Durable JSON conversation<br/>one per chat + revision")]
     Config[("Server-managed YAML<br/>+ encrypted SQLite credentials")]
     Client --> TCP & SSH & WS & HTTP
-    TCP & SSH & WS & HTTP --> RPC
+    Browser --> Web
+    TCP & SSH & WS & HTTP & Web --> RPC
     RPC --> Runtime
     Runtime --> Chat
     RPC --> Config
 ```
 
-Every ServerSide session uses durable chat storage. Provider/MCP credentials **supplied by a mobile client** exist only in the runtime RAM; the server's *locally managed* provider credentials use encrypted SQLite and are not confused with the mobile handoff.
+Every ServerSide session uses durable chat storage. Provider/MCP credentials supplied at runtime by a client exist only in RAM; the server's *locally managed* provider credentials use encrypted SQLite and are not confused with the mobile handoff.
 
 ## 2. Public API endpoints
 
@@ -37,7 +40,28 @@ Every ServerSide session uses durable chat storage. Provider/MCP credentials **s
 | TLS/TCP | Length-prefixed JSON frames (4-byte big-endian size) | SSH-enrolled TCP identity |
 | `generative stream --stdio` | Same framed RPC via SSH + private daemon socket | SSH-enrolled TCP identity |
 
-Public HTTP requires correctly configured TLS/reverse proxy. Plaintext HTTP data API is allowed only on loopback, under the server's security policy. `/connect` serves the embedded developer console. Browsers cannot verify the invitation SPKI pin; verify the HTTPS certificate independently before redeeming the code.
+Mobile HTTP/WS uses the existing HTTPS or loopback transport policy. Opening a mobile invitation URL at `/connect` serves the embedded browser client without redeeming the code. The mobile client verifies TLS and the SPKI pin and explicitly calls `POST /v1/pair`.
+
+### Embedded browser routes
+
+| Endpoint | Purpose | Authentication |
+| --- | --- | --- |
+| `GET /web/auth/status` | `configured` and `authenticated` flags, plus a public `session_version` for an authenticated session | Configured origin, optional session cookie |
+| `POST /web/auth/bootstrap` | Accept `{}` and establish a cookie session in an enabled passwordless origin | Same-origin protected POST and no effective password |
+| `POST /web/auth/login` | Accept `{"password":"…"}`, rotate the session cookie, and return the public `session_version` | Effective web password from flag, environment or local CLI |
+| `POST /web/auth/logout` | Accept `{}`, revoke the current session and clear the cookie | Session cookie and matching session version when cookie is present |
+| `POST /web/rpc` | v5 RPC envelope and error mapping | Session cookie and matching session version |
+| `GET /web/events?session_id=...&after=...` | Existing SSE and JSON long-poll semantics, including event cursor and revisions | Session cookie and matching session version |
+
+All web POSTs require `Content-Type: application/json`, the exact configured `Origin` and `X-Generative-Web: 1`. The browser sends `X-Generative-Session: <session_version>` on RPC, event and logout requests. The version binds requests to the current cookie across tabs and rotates with it. Only the server-issued HttpOnly cookie carries the session credential. Responses are non-cacheable. Cross-site fetches are rejected, and these endpoints expose no cross-origin CORS access.
+
+The default numeric loopback listener allows passwordless access when the web password is unset. Every actual passwordless daemon start with HTTP enabled warns on stderr. Anyone who can reach a passwordless origin can access its workspace. Keep loopback HTTP isolated from proxies. It requires matching the numeric listener and rejects forwarding headers.
+
+Remote access uses the exact `--web-origin` over HTTPS. Restrict access to the upstream and set `--web-trusted-proxy` to the proxy's socket peer IP. The proxy preserves the public `Host` and overwrites `X-Forwarded-Proto`. Plain HTTP at the proxy must redirect or fail. Web auth trusts no forwarded client IP fields. A password is required for HTTPS unless administrators explicitly enable `--allow-public-web-without-password`. [Setup and service examples](../README.md#web-chat-client)
+
+The daemon resolves `--web-password` before `GENERATIVE_WEB_PASSWORD`, then falls back to the saved verifier or passwordless mode. Explicit empty overrides fail startup. Saved-password editing is available via the private socket with `generative web password set`, `reset` or `unset`. Overrides apply at startup and persist only as a salted restart-comparison verifier. Saved edits take effect when the override is removed and the daemon restarts. [Password and service configuration](../README.md#web-chat-client)
+
+A browser session resolves to the server-owned web workspace. Mobile bearer credentials authenticate on the mobile endpoints. Signing out, changing the effective password or mode, or running `generative web sessions revoke-all` closes affected streams and preserves workspace history. Sessions have a 24-hour RPC idle limit and a seven-day absolute lifetime. Idle SSE and status polling do not renew them. Native terminal and coding-agent RPCs remain available to paired clients subject to the existing server opt-ins. Existing browser-paired chats remain under their original owner. Use the legacy authenticated export flow or the local admin export commands to retain access. [Old browser history and export](../README.md#web-chat-client)
 
 ## 3. Pairing and authentication
 

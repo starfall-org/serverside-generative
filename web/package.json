@@ -1,20 +1,52 @@
 {
-  "dependencies": {
-    "@radix-ui/react-slot": "^1.5.0",
-    "class-variance-authority": "^0.7.1",
-    "lucide-react": "^1.73.0",
-    "react": "^19.3.1",
-    "react-dom": "^19.3.1"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-react": "^6.3.0",
-    "vite": "^8.3.8"
-  },
-  "name": "serverside-dev-client",
+  "name": "generative-web",
   "private": true,
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "@radix-ui/react-alert-dialog": "^1.1.16",
+    "@radix-ui/react-dialog": "^1.1.16",
+    "@radix-ui/react-dropdown-menu": "^2.1.17",
+    "@radix-ui/react-scroll-area": "^1.2.11",
+    "@radix-ui/react-select": "^2.2.7",
+    "@radix-ui/react-slot": "^1.5.0",
+    "@radix-ui/react-tooltip": "^1.2.9",
+    "class-variance-authority": "^0.7.1",
+    "lucide-react": "^1.73.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@playwright/test": "^1.65.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^26.6.11",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.3.0",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "jsdom": "^27.2.0",
+    "prettier": "^3.7.4",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1",
+    "vite": "^8.3.8",
+    "vitest": "^4.0.15"
   }
 }

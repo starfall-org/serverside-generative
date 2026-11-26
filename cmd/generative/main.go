@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mdp/qrterminal/v3"
 	"github.com/starfall-org/serverside-generative/internal/catalog"
@@ -30,6 +32,7 @@ import (
 	"github.com/starfall-org/serverside-generative/internal/secrets"
 	"github.com/starfall-org/serverside-generative/internal/service"
 	"go.yaml.in/yaml/v4"
+	"golang.org/x/term"
 )
 
 var version = "dev"
@@ -42,7 +45,7 @@ func main() {
 }
 func usage() {
 	fmt.Fprintln(os.Stderr, "generative: paired session runtime")
-	fmt.Fprintln(os.Stderr, "Commands: serve, service, handshake --stdio, pair, stream, manage, version, config, provider, model, mcp, profile, tool, chat")
+	fmt.Fprintln(os.Stderr, "Commands: serve, service, handshake --stdio, pair, stream, web, manage, version, config, provider, model, mcp, profile, tool, chat")
 }
 func defaultIPC() string {
 	dir, _ := os.UserConfigDir()
@@ -234,7 +237,7 @@ func run(args []string) error {
 		action := args[1]
 		fs := flag.NewFlagSet("chat "+action, flag.ContinueOnError)
 		id := fs.String("id", "", "conversation ID")
-		owner := fs.String("client-id", "", "paired owner ID")
+		owner := fs.String("client-id", "", "conversation owner ID")
 		pathArg := fs.String("data-dir", "", "chat data directory")
 		file := fs.String("file", "", "conversation JSON to import")
 		out := fs.String("out", "", "new output path for export")
@@ -856,16 +859,81 @@ func run(args []string) error {
 		}
 		return nil
 
+	case "web":
+		if len(args) < 3 {
+			return errors.New("usage: generative web password {set|reset|unset} [--ipc PATH] [--stdin] or generative web sessions revoke-all [--ipc PATH]")
+		}
+		action := args[1] + " " + args[2]
+		switch action {
+		case "password set", "password reset", "password unset", "sessions revoke-all":
+		default:
+			return errors.New("unknown web command; use password set, reset, unset or sessions revoke-all")
+		}
+		fs := flag.NewFlagSet("web "+action, flag.ContinueOnError)
+		ipc := fs.String("ipc", defaultIPC(), "running daemon's private control socket")
+		var stdin bool
+		if action == "password set" || action == "password reset" {
+			fs.BoolVar(&stdin, "stdin", false, "read password from private standard input")
+		}
+		if err := fs.Parse(args[3:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("web commands take no positional arguments")
+		}
+		if action == "sessions revoke-all" {
+			if _, err := node.ControlRequest(*ipc, "web_sessions_revoke"); err != nil {
+				return err
+			}
+			fmt.Println("Web sessions revoked")
+			return nil
+		}
+		fields := map[string]string{"method": "web_password_" + args[2]}
+		if action != "password unset" {
+			password, err := readWebPassword(stdin)
+			if err != nil {
+				return err
+			}
+			defer clear(password)
+			if len(password) < 12 || len(password) > 512 || !utf8.Valid(password) {
+				return errors.New("web password must be 12 to 512 UTF-8 bytes")
+			}
+			fields["password"] = string(password)
+		}
+		raw, err := node.ControlRequestFields(*ipc, fields)
+		if err != nil {
+			return err
+		}
+		var result struct {
+			Configured      bool `json:"configured"`
+			StartupOverride bool `json:"startup_override"`
+		}
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return errors.New("invalid web configuration response")
+		}
+		if result.StartupOverride {
+			fmt.Println("Saved web password updated. The startup override remains effective until changed or removed and the daemon restarts.")
+		} else if !result.Configured {
+			fmt.Fprintln(os.Stderr, "WARNING: Web UI has no password. Anyone who can reach an enabled passwordless endpoint may access the workspace.")
+		} else {
+			fmt.Println("Web password configured")
+		}
+		return nil
+
 	case "serve":
 		fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+		webPassword := fs.String("web-password", "", "startup-only web password (overrides GENERATIVE_WEB_PASSWORD and saved password). Flags expose passwords in process listings or history, and environment variables may be visible to privileged processes. Prefer web password set or a protected service environment.")
+		allowPublicPasswordless := fs.Bool("allow-public-web-without-password", false, "allow passwordless access at the configured HTTPS web origin")
+		webOrigin := fs.String("web-origin", "", "exact browser origin (HTTPS or explicitly local numeric loopback HTTP)")
+		webProxy := fs.String("web-trusted-proxy", "", "trusted TLS reverse proxy source IP for the web origin")
 		tcpAddr := fs.String("tcp-listen", "127.0.0.1:7090", "TLS/TCP data listener")
 		advertise := fs.String("advertise", "", "TCP endpoint advertised to clients (host:port)")
 		httpAddr := fs.String("http-listen", "127.0.0.1:7091", "HTTP/WS v5 data and URL pairing listener; off disables")
 		password := fs.String("password", os.Getenv("GENERATIVE_HANDSHAKE_PASSWORD"), "legacy HTTP/WS pairing password (requires --allow-legacy-pairing)")
 		allowLegacyPairing := fs.Bool("allow-legacy-pairing", false, "temporarily allow deprecated HTTP/WS password and Human Relay enrollment for v4 clients")
-		dataDir := fs.String("data-dir", "", "catalog and opted-in chat data directory")
-		identityDir := fs.String("identity-dir", "", "connection identity and paired client credential hashes only")
-		ipc := fs.String("ipc", "", "control socket for SSH handshake and human pairing")
+		dataDir := fs.String("data-dir", "", "catalog and durable chat data directory")
+		identityDir := fs.String("identity-dir", "", "private TLS identity, mobile credentials and web authentication state")
+		ipc := fs.String("ipc", "", "private control socket for pairing and web administration")
 		dataSocket := fs.String("data-socket", "", "private v5 framed data socket for SSH stdio")
 		human := fs.Bool("human", false, "display Human Relay QR and PIN on startup")
 		onlyHTTP := fs.Bool("http-only", false, "disable the legacy pairing WebSocket (v5 WebSocket remains enabled)")
@@ -876,6 +944,10 @@ func run(args []string) error {
 		enableAgent := fs.Bool("enable-agent", false, "allow paired clients to control structured Claude Code, Codex and OpenCode sessions")
 		agentRoot := fs.String("agent-root", "", "working directory root for new agent processes; defaults to current directory")
 		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		startupOverride, err := resolveWebStartupPassword(fs, webPassword)
+		if err != nil {
 			return err
 		}
 		if err := node.SafeHTTPBind(*httpAddr, *allowPublic); err != nil {
@@ -906,8 +978,21 @@ func run(args []string) error {
 		if host == "" || host == "0.0.0.0" || host == "::" {
 			return fmt.Errorf("set --advertise to a reachable address instead of %q", ep)
 		}
-		c := node.Config{TCPListen: listener.Addr().String(), Advertise: ep, HTTPListen: *httpAddr, IPCSocket: *ipc, DataSocket: *dataSocket, IdentityDir: *identityDir, DataDir: *dataDir, Password: *password, Human: *human, HTTPOnly: *onlyHTTP, LegacyPairing: *allowLegacyPairing, AllowPublicHTTP: *allowPublic, AllowLocalAPI: *allowLocalAPI, EnableTerminal: *enableTerminal, TerminalCWD: *terminalCWD, EnableAgent: *enableAgent, AgentRoot: *agentRoot}
+		c := node.Config{
+			TCPListen: listener.Addr().String(), Advertise: ep, HTTPListen: *httpAddr,
+			IPCSocket: *ipc, DataSocket: *dataSocket, IdentityDir: *identityDir, DataDir: *dataDir,
+			WebOrigin: *webOrigin, WebTrustedProxy: *webProxy,
+			WebPasswordOverride: startupOverride, AllowPublicWebWithoutPassword: *allowPublicPasswordless,
+			Password: *password, Human: *human, HTTPOnly: *onlyHTTP, LegacyPairing: *allowLegacyPairing,
+			AllowPublicHTTP: *allowPublic, AllowLocalAPI: *allowLocalAPI,
+			EnableTerminal: *enableTerminal, TerminalCWD: *terminalCWD,
+			EnableAgent: *enableAgent, AgentRoot: *agentRoot,
+		}
 		n, err := node.New(c)
+		if startupOverride != nil {
+			*startupOverride = ""
+			_ = os.Unsetenv("GENERATIVE_WEB_PASSWORD")
+		}
 		if err != nil {
 			return err
 		}
@@ -948,6 +1033,9 @@ func run(args []string) error {
 			httpListener, err := net.Listen("tcp", *httpAddr)
 			if err != nil {
 				return err
+			}
+			if warning := n.WebStartupWarning(httpListener.Addr().String()); warning != "" {
+				fmt.Fprintln(os.Stderr, warning)
 			}
 			httpSrv = &http.Server{Handler: n.HTTPHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second}
 			go func() {
@@ -996,4 +1084,57 @@ func run(args []string) error {
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func readWebPassword(fromStdin bool) ([]byte, error) {
+	fd := int(os.Stdin.Fd())
+	if fromStdin && !term.IsTerminal(fd) {
+		raw, err := io.ReadAll(io.LimitReader(os.Stdin, 515))
+		if err != nil {
+			return nil, errors.New("could not read web password")
+		}
+		password := bytes.TrimSuffix(bytes.TrimSuffix(raw, []byte("\n")), []byte("\r"))
+		if len(password) > 512 || bytes.ContainsAny(password, "\r\n") {
+			clear(raw)
+			return nil, errors.New("expected one web password of at most 512 bytes")
+		}
+		return password, nil
+	}
+	if fromStdin || !term.IsTerminal(fd) {
+		return nil, errors.New("use an interactive terminal or --stdin with private input")
+	}
+	fmt.Fprint(os.Stderr, "Web password: ")
+	password, err := term.ReadPassword(fd)
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return nil, errors.New("could not read web password")
+	}
+	fmt.Fprint(os.Stderr, "Confirm web password: ")
+	confirmation, err := term.ReadPassword(fd)
+	fmt.Fprintln(os.Stderr)
+	defer clear(confirmation)
+	if err != nil || !bytes.Equal(password, confirmation) {
+		clear(password)
+		return nil, errors.New("web password confirmation failed")
+	}
+	return password, nil
+}
+
+func resolveWebStartupPassword(fs *flag.FlagSet, webPassword *string) (*string, error) {
+	var startupOverride *string
+	flagSupplied := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "web-password" {
+			flagSupplied = true
+		}
+	})
+	if flagSupplied {
+		startupOverride = webPassword
+	} else if value, exists := os.LookupEnv("GENERATIVE_WEB_PASSWORD"); exists {
+		startupOverride = &value
+	}
+	if startupOverride != nil && (len(*startupOverride) < 12 || len(*startupOverride) > 512 || !utf8.ValidString(*startupOverride)) {
+		return nil, errors.New("startup web password must be 12 to 512 UTF-8 bytes")
+	}
+	return startupOverride, nil
 }

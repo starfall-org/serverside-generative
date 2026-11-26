@@ -37,23 +37,27 @@ const ProtocolVersion = 4
 const TicketLifetime = 2 * time.Minute
 
 type Config struct {
-	TCPListen       string
-	Advertise       string
-	HTTPListen      string
-	IPCSocket       string
-	DataSocket      string
-	IdentityDir     string
-	DataDir         string
-	Password        string
-	Human           bool
-	HTTPOnly        bool
-	LegacyPairing   bool // explicit, temporary opt-in for old new-client enrollment
-	AllowPublicHTTP bool
-	AllowLocalAPI   bool
-	EnableTerminal  bool
-	TerminalCWD     string
-	EnableAgent     bool
-	AgentRoot       string
+	WebPasswordOverride           *string
+	AllowPublicWebWithoutPassword bool
+	WebOrigin                     string
+	WebTrustedProxy               string
+	TCPListen                     string
+	Advertise                     string
+	HTTPListen                    string
+	IPCSocket                     string
+	DataSocket                    string
+	IdentityDir                   string
+	DataDir                       string
+	Password                      string
+	Human                         bool
+	HTTPOnly                      bool
+	LegacyPairing                 bool // explicit, temporary opt-in for old new-client enrollment
+	AllowPublicHTTP               bool
+	AllowLocalAPI                 bool
+	EnableTerminal                bool
+	TerminalCWD                   string
+	EnableAgent                   bool
+	AgentRoot                     string
 }
 type Invitation struct {
 	Protocol    int    `json:"protocol"`
@@ -73,6 +77,7 @@ type pairEntry struct {
 	Scope      string `json:"scope,omitempty"`
 }
 type Node struct {
+	webAuth             *webAuth
 	Config              Config
 	Certificate         tls.Certificate
 	Fingerprint         string
@@ -207,7 +212,12 @@ func New(c Config) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	n := &Node{Config: c, Certificate: cert, Fingerprint: fp, tickets: make(map[[32]byte]time.Time), pins: make(map[[32]byte]time.Time), httpPairCodes: make(map[[32]byte]httpPairCode), pairs: make(map[string]pairEntry), attempts: make(map[string]*attempt), sessions: make(map[string]*Session), activeConnection: make(map[string]uint64)}
+	webAuth, err := newWebAuth(c)
+	if err != nil {
+		return nil, err
+	}
+	c.WebPasswordOverride = nil
+	n := &Node{Config: c, webAuth: webAuth, Certificate: cert, Fingerprint: fp, tickets: make(map[[32]byte]time.Time), pins: make(map[[32]byte]time.Time), httpPairCodes: make(map[[32]byte]httpPairCode), pairs: make(map[string]pairEntry), attempts: make(map[string]*attempt), sessions: make(map[string]*Session), activeConnection: make(map[string]uint64)}
 	sessionsV5 := chatsession.New(chatstore.New(c.DataDir))
 	sessionsV5.AllowLocalAPI(c.AllowLocalAPI)
 	sessionsV5.SetStoredResolver(func(raw json.RawMessage) (json.RawMessage, error) { return storedruntime.Resolve(c.DataDir, raw) })
@@ -218,6 +228,7 @@ func New(c Config) (*Node, error) {
 		return storedruntime.ResolveCustomTools(c.DataDir, raw)
 	})
 	n.rpc = rpc.New(sessionsV5)
+	n.webAuth.releaseWorkspace = func() { n.rpc.Revoke(webOwner) }
 	n.rpc.SetCatalog(catalog.New(c.DataDir))
 	n.rpc.SetProviderCatalog(func() (any, error) {
 		return storedruntime.ReadCatalogValidated(c.DataDir, chatsession.ValidateStoredRuntime)
@@ -234,6 +245,9 @@ func New(c Config) (*Node, error) {
 			return nil, fmt.Errorf("invalid clients store: %w", err)
 		}
 		for _, p := range pairs {
+			if p.ID == webOwner {
+				return nil, errors.New("reserved owner in clients store")
+			}
 			n.pairs[p.ID] = p
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {

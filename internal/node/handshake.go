@@ -25,6 +25,7 @@ func (n *Node) HTTPHandler() http.Handler {
 	mux := http.NewServeMux()
 	n.registerV5(mux)
 	registerWeb(mux)
+	n.registerWebAuth(mux)
 	mux.HandleFunc("POST /v1/handshake", func(w http.ResponseWriter, r *http.Request) {
 		if !n.Config.LegacyPairing {
 			http.Error(w, "legacy pairing disabled: use SSH for TCP or URL for HTTP/WS", http.StatusGone)
@@ -143,12 +144,39 @@ func (n *Node) handleIPC(conn net.Conn) {
 		Method   string `json:"method"`
 		Endpoint string `json:"endpoint"`
 		Pin      string `json:"pin"`
+		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(io.LimitReader(conn, 4096)).Decode(&input); err != nil {
 		return
 	}
 	encoder := json.NewEncoder(conn)
 	switch input.Method {
+	case "web_password_set", "web_password_reset", "web_password_unset", "web_sessions_revoke":
+		if DataSocketSupported() && !authorizedLocalPeer(conn) {
+			_ = encoder.Encode(map[string]string{"error": "unauthorized control peer"})
+			return
+		}
+		if input.Method == "web_sessions_revoke" {
+			if err := n.webAuth.revokeAll(); err != nil {
+				_ = encoder.Encode(map[string]string{"error": err.Error()})
+			} else {
+				_ = encoder.Encode(map[string]bool{"revoked": true})
+			}
+			return
+		}
+		var err error
+		switch input.Method {
+		case "web_password_unset":
+			err = n.webAuth.unsetPassword()
+		default:
+			err = n.webAuth.setPassword(input.Password, input.Method == "web_password_reset")
+		}
+		if err != nil {
+			_ = encoder.Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		required, override := n.webAuth.passwordMode()
+		_ = encoder.Encode(map[string]bool{"configured": required, "startup_override": override})
 	case "pair_http_cancel":
 		n.mu.Lock()
 		count := len(n.httpPairCodes)
@@ -234,11 +262,21 @@ func ControlRequest(path, method string) (json.RawMessage, error) {
 	return ControlRequestFields(path, map[string]string{"method": method})
 }
 func ControlRequestFields(path string, input map[string]string) (json.RawMessage, error) {
+	web := strings.HasPrefix(input["method"], "web_")
+	if web {
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0600 {
+			return nil, errors.New("web administration requires the running daemon's private control socket")
+		}
+	}
 	conn, err := net.DialTimeout("unix", path, 3*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("connect to running daemon: %w", err)
 	}
 	defer conn.Close()
+	if web && DataSocketSupported() && !authorizedLocalPeer(conn) {
+		return nil, errors.New("control socket peer mismatch")
+	}
 	_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
 	if err = json.NewEncoder(conn).Encode(input); err != nil {
 		return nil, err

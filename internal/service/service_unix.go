@@ -89,7 +89,7 @@ func validate(c config) error {
 		}
 	}
 	for _, s := range c.Args {
-		if s == "--password" || s == "-password" || strings.HasPrefix(s, "--password=") || strings.HasPrefix(s, "-password=") {
+		if name, _, _ := strings.Cut(strings.TrimLeft(s, "-"), "="); strings.HasPrefix(s, "-") && (name == "password" || name == "web-password") {
 			return errors.New("do not persist passwords in service arguments")
 		}
 	}
