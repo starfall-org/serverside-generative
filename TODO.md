@@ -1,7 +1,7 @@
 # TODO — Separate authentication for the embedded Generative web client
 
 Date: 2026-11-26. Replaces the previous general web-client roadmap in full.
-Scope: serverside-generative only; no Android/Kotlin changes.
+Scope: generative-server only; no Android/Kotlin changes.
 
 ## 1. Required behavior
 

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/starfall-org/serverside-generative/internal/execution"
+	"github.com/starfall-org/generative-server/internal/execution"
 )
 
 func pairID(t *testing.T, n *Node) string {

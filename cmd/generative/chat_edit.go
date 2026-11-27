@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/starfall-org/serverside-generative/internal/chatstore"
-	"github.com/starfall-org/serverside-generative/internal/node"
+	"github.com/starfall-org/generative-server/internal/chatstore"
+	"github.com/starfall-org/generative-server/internal/node"
 )
 
 // editSyncedChat opens an existing opt-in JSON chat in a private temporary

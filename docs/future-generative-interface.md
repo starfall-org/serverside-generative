@@ -91,4 +91,4 @@ flowchart TD
 
 This conceptual hierarchy intentionally avoids prescribing Compose widgets, Android navigation, a local Room schema, developer-feature hooks or a production release. Those decisions require a separate, explicit request.
 
-**Current scope exclusion:** do not modify `~/generative` anywhere, including `extensions/` or Developer features, and do not build/test Android. All current executable work belongs only to `~/serverside-generative`.
+**Current scope exclusion:** do not modify `~/generative` anywhere, including `extensions/` or Developer features, and do not build/test Android. All current executable work belongs only to the `generative-server` repository.

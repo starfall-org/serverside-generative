@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/starfall-org/serverside-generative/internal/chatstore"
+	"github.com/starfall-org/generative-server/internal/chatstore"
 )
 
 // Uploads are bounded, owner-bound, process-local and never written to disk.

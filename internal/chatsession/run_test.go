@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/starfall-org/serverside-generative/internal/catalog"
-	"github.com/starfall-org/serverside-generative/internal/chatstore"
-	"github.com/starfall-org/serverside-generative/internal/secrets"
-	"github.com/starfall-org/serverside-generative/internal/storedruntime"
+	"github.com/starfall-org/generative-server/internal/catalog"
+	"github.com/starfall-org/generative-server/internal/chatstore"
+	"github.com/starfall-org/generative-server/internal/secrets"
+	"github.com/starfall-org/generative-server/internal/storedruntime"
 )
 
 func TestRunTextPersistenceAndDedupe(t *testing.T) {

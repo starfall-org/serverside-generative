@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"sort"
 
-	"github.com/starfall-org/serverside-generative/internal/secrets"
+	"github.com/starfall-org/generative-server/internal/secrets"
 )
 
 // ResolveCustomTools decrypts only explicitly granted IDs and does not create

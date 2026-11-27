@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/starfall-org/serverside-generative/internal/agent"
+	"github.com/starfall-org/generative-server/internal/agent"
 )
 
 // Agent controls belong to paired clients and are intentionally excluded from

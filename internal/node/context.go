@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/starfall-org/serverside-generative/internal/execution"
+	"github.com/starfall-org/generative-server/internal/execution"
 )
 
 // SharedConfig is global for this personal single-user server, not per client.

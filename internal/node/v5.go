@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/starfall-org/serverside-generative/internal/chatsession"
+	"github.com/starfall-org/generative-server/internal/chatsession"
 	"io"
 	"net"
 	"net/http"
@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/starfall-org/serverside-generative/internal/rpc"
+	"github.com/starfall-org/generative-server/internal/rpc"
 )
 
 type apiToken struct {

@@ -3,7 +3,7 @@ package node
 import (
 	"errors"
 
-	"github.com/starfall-org/serverside-generative/internal/terminal"
+	"github.com/starfall-org/generative-server/internal/terminal"
 )
 
 type BuiltinTool struct {

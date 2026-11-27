@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/starfall-org/serverside-generative/internal/chatstore"
-	"github.com/starfall-org/serverside-generative/internal/storedruntime"
+	"github.com/starfall-org/generative-server/internal/chatstore"
+	"github.com/starfall-org/generative-server/internal/storedruntime"
 )
 
 var (

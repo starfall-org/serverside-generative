@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/starfall-org/serverside-generative/internal/compat"
+	"github.com/starfall-org/generative-server/internal/compat"
 	"go.yaml.in/yaml/v4"
 )
 

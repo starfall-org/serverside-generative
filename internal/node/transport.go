@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/starfall-org/serverside-generative/internal/agent"
+	"github.com/starfall-org/generative-server/internal/agent"
 )
 
 const maxFrame = 4 << 20

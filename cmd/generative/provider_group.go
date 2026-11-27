@@ -4,7 +4,7 @@ import (
 	"flag"
 	"fmt"
 
-	"github.com/starfall-org/serverside-generative/internal/catalog"
+	"github.com/starfall-org/generative-server/internal/catalog"
 	"go.yaml.in/yaml/v4"
 )
 

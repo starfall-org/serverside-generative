@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/starfall-org/serverside-generative/internal/httptool"
+	"github.com/starfall-org/generative-server/internal/httptool"
 	_ "modernc.org/sqlite"
 )
 

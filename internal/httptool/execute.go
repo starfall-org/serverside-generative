@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
-	"github.com/starfall-org/serverside-generative/internal/execution"
+	"github.com/starfall-org/generative-server/internal/execution"
 )
 
 var ErrDenied = errors.New("tool permission denied")

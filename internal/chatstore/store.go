@@ -19,7 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/starfall-org/serverside-generative/internal/compat"
+	"github.com/starfall-org/generative-server/internal/compat"
 )
 
 const MaxConversationBytes = 16 << 20

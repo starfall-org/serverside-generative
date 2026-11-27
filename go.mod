@@ -1,4 +1,4 @@
-module github.com/starfall-org/serverside-generative
+module github.com/starfall-org/generative-server
 
 go 1.26.10
 

@@ -23,14 +23,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/starfall-org/serverside-generative/internal/agent"
-	"github.com/starfall-org/serverside-generative/internal/catalog"
-	"github.com/starfall-org/serverside-generative/internal/chatsession"
-	"github.com/starfall-org/serverside-generative/internal/chatstore"
-	"github.com/starfall-org/serverside-generative/internal/configdir"
-	"github.com/starfall-org/serverside-generative/internal/rpc"
-	"github.com/starfall-org/serverside-generative/internal/storedruntime"
-	"github.com/starfall-org/serverside-generative/internal/terminal"
+	"github.com/starfall-org/generative-server/internal/agent"
+	"github.com/starfall-org/generative-server/internal/catalog"
+	"github.com/starfall-org/generative-server/internal/chatsession"
+	"github.com/starfall-org/generative-server/internal/chatstore"
+	"github.com/starfall-org/generative-server/internal/configdir"
+	"github.com/starfall-org/generative-server/internal/rpc"
+	"github.com/starfall-org/generative-server/internal/storedruntime"
+	"github.com/starfall-org/generative-server/internal/terminal"
 )
 
 const ProtocolVersion = 4

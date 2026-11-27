@@ -1,6 +1,7 @@
 /generative
 /serverside
 /serverside-generative
+/generative-server
 /dist/
 /testclient-state.json
 /client-state.json

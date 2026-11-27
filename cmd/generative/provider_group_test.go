@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/starfall-org/serverside-generative/internal/catalog"
+	"github.com/starfall-org/generative-server/internal/catalog"
 )
 
 func TestProviderGroupCommandsRoundTripAndCAS(t *testing.T) {

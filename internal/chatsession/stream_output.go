@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/starfall-org/serverside-generative/internal/execution"
+	"github.com/starfall-org/generative-server/internal/execution"
 )
 
 type runToolActivity struct {

@@ -7,10 +7,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/starfall-org/serverside-generative/internal/catalog"
+	"github.com/starfall-org/generative-server/internal/catalog"
 
-	"github.com/starfall-org/serverside-generative/internal/chatsession"
-	"github.com/starfall-org/serverside-generative/internal/chatstore"
+	"github.com/starfall-org/generative-server/internal/chatsession"
+	"github.com/starfall-org/generative-server/internal/chatstore"
 )
 
 type Request struct {

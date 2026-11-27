@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
-	"github.com/starfall-org/serverside-generative/internal/execution"
-	"github.com/starfall-org/serverside-generative/internal/httptool"
+	"github.com/starfall-org/generative-server/internal/execution"
+	"github.com/starfall-org/generative-server/internal/httptool"
 )
 
 // MCP requires an explicit session grant in addition to mobile tool and profile switches.

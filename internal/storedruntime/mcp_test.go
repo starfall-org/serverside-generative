@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/starfall-org/serverside-generative/internal/catalog"
-	"github.com/starfall-org/serverside-generative/internal/secrets"
+	"github.com/starfall-org/generative-server/internal/catalog"
+	"github.com/starfall-org/generative-server/internal/secrets"
 )
 
 func TestResolveStoredMCPUsesOnlySelectedCatalogAndExplicitGrants(t *testing.T) {

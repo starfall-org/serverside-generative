@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/starfall-org/serverside-generative/internal/execution"
+	"github.com/starfall-org/generative-server/internal/execution"
 )
 
 const maxEvents = 2048

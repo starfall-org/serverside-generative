@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/starfall-org/serverside-generative/internal/httptool"
+	"github.com/starfall-org/generative-server/internal/httptool"
 )
 
 // runtimeSecrets gathers credential-bearing values. Each adapter must also

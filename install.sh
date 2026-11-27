@@ -4,7 +4,7 @@
 set -eu
 umask 077
 
-repo=starfall-org/serverside-generative
+repo=starfall-org/generative-server
 api=https://api.github.com/repos/$repo/releases
 base=https://github.com/$repo/releases/download
 

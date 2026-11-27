@@ -13,7 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/starfall-org/serverside-generative/internal/terminal/terminalid"
+	"github.com/starfall-org/generative-server/internal/terminal/terminalid"
 )
 
 const (

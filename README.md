@@ -1,4 +1,4 @@
-# serverside-generative
+# Generative Server (`generative-server`)
 
 Self-hosted Go session runtime offering one v5 JSON RPC API over TLS/TCP, SSH stdio, WebSocket and HTTP/SSE. Its v5 API supports the Generative Android **Server Connection** workspace; each paired client has its own server-side conversation history.
 
@@ -66,7 +66,7 @@ The built client is checked in under `internal/node/web` and embedded in the Go 
 Install the **latest published GitHub Release**, including pre-releases, on Linux or macOS (x86-64 / arm64):
 
 ```sh
-curl -fsSLo install-generative.sh https://raw.githubusercontent.com/starfall-org/serverside-generative/main/install.sh
+curl -fsSLo install-generative.sh https://raw.githubusercontent.com/starfall-org/generative-server/main/install.sh
 sh install-generative.sh
 ```
 

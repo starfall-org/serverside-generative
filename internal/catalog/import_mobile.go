@@ -10,9 +10,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/starfall-org/serverside-generative/internal/compat"
-	"github.com/starfall-org/serverside-generative/internal/execution"
-	"github.com/starfall-org/serverside-generative/internal/secrets"
+	"github.com/starfall-org/generative-server/internal/compat"
+	"github.com/starfall-org/generative-server/internal/execution"
+	"github.com/starfall-org/generative-server/internal/secrets"
 	"go.yaml.in/yaml/v4"
 )
 

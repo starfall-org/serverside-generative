@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/starfall-org/serverside-generative/internal/chatstore"
+	"github.com/starfall-org/generative-server/internal/chatstore"
 )
 
 func chunkFixture(t *testing.T) (*Manager, json.RawMessage) {

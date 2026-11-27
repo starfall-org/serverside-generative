@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/starfall-org/serverside-generative/internal/configdir"
+	"github.com/starfall-org/generative-server/internal/configdir"
 )
 
 const socketPollInterval = 100 * time.Millisecond

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/starfall-org/serverside-generative/internal/rpc"
+	"github.com/starfall-org/generative-server/internal/rpc"
 )
 
 // StartDataSocket creates a private Unix socket for framed v5 traffic.

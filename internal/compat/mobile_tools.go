@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/starfall-org/serverside-generative/internal/httptool"
+	"github.com/starfall-org/generative-server/internal/httptool"
 )
 
 var ErrMobileToolSettings = errors.New("invalid mobile tool settings")

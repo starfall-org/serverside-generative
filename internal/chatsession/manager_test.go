@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/starfall-org/serverside-generative/internal/chatstore"
+	"github.com/starfall-org/generative-server/internal/chatstore"
 )
 
 var sample = json.RawMessage(`{"id":"c","title":"title","created_at":1,"updated_at":2,"messages":[]}`)

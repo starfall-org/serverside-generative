@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dependency-free Python interoperability client for serverside-generative.
+"""Dependency-free Python interoperability client for generative-server.
 
 Usage:
   python3 testclient/client.py pair --method http --url http://127.0.0.1:7091 --password 'long-secret' --state /tmp/client.json

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/starfall-org/serverside-generative/internal/rpc"
+	"github.com/starfall-org/generative-server/internal/rpc"
 )
 
 func TestInventoryOnUninitializedServer(t *testing.T) {

@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/starfall-org/serverside-generative/internal/rpc"
+	"github.com/starfall-org/generative-server/internal/rpc"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/time/rate"
 )

@@ -1,6 +1,6 @@
-# ServerSide — Problems identified for the Generative “Server Connection” feature
+# Generative Server — Problems identified for the Generative “Server Connection” feature
 
-Reviewed: 2026-11-17. **Tracker:** these are server-side requirements/gaps and their current disposition. Keep fixes in `~/serverside-generative`, not as compatibility hacks in `~/generative`.
+Reviewed: 2026-11-17. **Tracker:** these are server-side requirements/gaps and their current disposition. Keep fixes in the `generative-server` repository, not as compatibility hacks in `~/generative`.
 
 ## P1 — Incomplete remote session-list metadata and unsuitable list ordering (interface blocker)
 

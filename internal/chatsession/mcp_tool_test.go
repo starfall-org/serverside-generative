@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/starfall-org/serverside-generative/internal/chatstore"
+	"github.com/starfall-org/generative-server/internal/chatstore"
 )
 
 func TestMCPGrantsAndParameterOverrides(t *testing.T) {
