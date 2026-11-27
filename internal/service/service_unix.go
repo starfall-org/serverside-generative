@@ -10,7 +10,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/starfall-org/serverside-generative/internal/configdir"
 	"io"
 	"net"
 	"os"
@@ -23,6 +22,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/starfall-org/serverside-generative/internal/configdir"
 )
 
 const unit = "serverside.service"
@@ -95,16 +96,27 @@ func validate(c config) error {
 	}
 	return nil
 }
-func invoke(bin string, args ...string) error {
-	c := exec.Command(bin, args...)
-	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+
+type commandIO struct {
+	ctx context.Context
+	in  io.Reader
+	out io.Writer
+	err io.Writer
+}
+
+func (output commandIO) invoke(bin string, args ...string) error {
+	c := exec.CommandContext(output.ctx, bin, args...)
+	c.Stdin, c.Stdout, c.Stderr = output.in, output.out, output.err
 	return c.Run()
 }
-func autoBackend() string {
+func autoBackend(ctx context.Context) string {
 	if runtime.GOOS == "darwin" {
-		return "launchd"
+		if exec.CommandContext(ctx, "launchctl", "print", domain()).Run() == nil {
+			return "launchd"
+		}
+		return "native"
 	}
-	if _, err := os.Stat("/run/systemd/system"); err == nil && exec.Command("systemctl", "--user", "show-environment").Run() == nil {
+	if _, err := os.Stat("/run/systemd/system"); err == nil && exec.CommandContext(ctx, "systemctl", "--user", "show-environment").Run() == nil {
 		return "systemd"
 	}
 	return "native"
@@ -154,6 +166,15 @@ func Run(args []string, exe string) error {
 	if args[0] == "supervise" && len(args) == 1 {
 		return supervise(dir)
 	}
+	output := commandIO{context.Background(), os.Stdin, os.Stdout, os.Stderr}
+	switch args[0] {
+	case "install", "start", "stop", "restart", "uninstall":
+		lock, err := lockService(output.ctx, dir)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+	}
 	if args[0] == "install" {
 		f := flag.NewFlagSet("service install", flag.ContinueOnError)
 		kind := f.String("backend", "auto", "auto, systemd, launchd, or native")
@@ -161,7 +182,13 @@ func Run(args []string, exe string) error {
 			return err
 		}
 		if *kind == "auto" {
-			*kind = autoBackend()
+			if old, err := load(dir); err == nil {
+				*kind = old.Backend
+			} else if !os.IsNotExist(err) {
+				return err
+			} else {
+				*kind = autoBackend(output.ctx)
+			}
 		}
 		if (*kind == "systemd" && runtime.GOOS != "linux") || (*kind == "launchd" && runtime.GOOS != "darwin") {
 			return errors.New("backend unsupported on this OS")
@@ -178,40 +205,11 @@ func Run(args []string, exe string) error {
 			if old.Backend != c.Backend || old.Executable != c.Executable || old.CWD != c.CWD || strings.Join(old.Args, "\x00") != strings.Join(c.Args, "\x00") {
 				return errors.New("service already installed with different settings; uninstall first")
 			}
-			return action(dir, old, "start")
+			return output.action(dir, old, "start")
 		} else if !os.IsNotExist(e) {
 			return e
 		}
-		raw, _ := json.MarshalIndent(c, "", "  ")
-		if err = save(configPath(dir), raw); err != nil {
-			return err
-		}
-		switch c.Backend {
-		case "systemd":
-			if err = save(unitPath(), []byte(unitFile(c))); err != nil {
-				return err
-			}
-			if err = invoke("systemctl", "--user", "daemon-reload"); err != nil {
-				return err
-			}
-			if err = invoke("systemctl", "--user", "enable", "--now", unit); err != nil {
-				return err
-			}
-			fmt.Println("For startup before login, enable user lingering with loginctl if supported.")
-		case "launchd":
-			if err = save(plistPath(), []byte(plistFile(c, logPath(dir)))); err != nil {
-				return err
-			}
-			if err = action(dir, c, "start"); err != nil {
-				return err
-			}
-		case "native":
-			if err = startNative(dir, c); err != nil {
-				return err
-			}
-			fmt.Println("Native supervisor restarts the daemon; configure a host startup hook for startup after machine reboot.")
-		}
-		return nil
+		return output.install(dir, c)
 	}
 	if len(args) != 1 {
 		return errors.New("unexpected service arguments")
@@ -220,9 +218,43 @@ func Run(args []string, exe string) error {
 	if err != nil {
 		return fmt.Errorf("service configuration: %w", err)
 	}
-	return action(dir, c, args[0])
+	return output.action(dir, c, args[0])
 }
-func action(dir string, c config, a string) error {
+func (output commandIO) install(dir string, c config) error {
+	raw, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err = save(configPath(dir), raw); err != nil {
+		return err
+	}
+	switch c.Backend {
+	case "systemd":
+		if err = save(unitPath(), []byte(unitFile(c))); err != nil {
+			return err
+		}
+		if err = output.invoke("systemctl", "--user", "daemon-reload"); err != nil {
+			return err
+		}
+		if err = output.invoke("systemctl", "--user", "enable", "--now", unit); err != nil {
+			return err
+		}
+		fmt.Fprintln(output.out, "For startup before login, enable user lingering with loginctl if supported.")
+	case "launchd":
+		if err = save(plistPath(), []byte(plistFile(c, logPath(dir)))); err != nil {
+			return err
+		}
+		return output.action(dir, c, "start")
+	case "native":
+		if err = output.startNative(dir, c); err != nil {
+			return err
+		}
+		fmt.Fprintln(output.out, "Native supervisor restarts the daemon; configure a host startup hook for startup after machine reboot.")
+	}
+	return nil
+}
+
+func (output commandIO) action(dir string, c config, a string) error {
 	switch a {
 	case "start", "stop", "restart", "status", "logs", "uninstall":
 	default:
@@ -231,43 +263,43 @@ func action(dir string, c config, a string) error {
 	switch c.Backend {
 	case "systemd":
 		if a == "logs" {
-			return invoke("journalctl", "--user", "-u", unit, "-n", "100", "--no-pager")
+			return output.invoke("journalctl", "--user", "-u", unit, "-n", "100", "--no-pager")
 		}
 		if a == "uninstall" {
-			if err := invoke("systemctl", "--user", "disable", "--now", unit); err != nil {
+			if err := output.invoke("systemctl", "--user", "disable", "--now", unit); err != nil {
 				return err
 			}
 			if err := os.Remove(unitPath()); err != nil && !os.IsNotExist(err) {
 				return err
 			}
-			if err := invoke("systemctl", "--user", "daemon-reload"); err != nil {
+			if err := output.invoke("systemctl", "--user", "daemon-reload"); err != nil {
 				return err
 			}
 			return os.Remove(configPath(dir))
 		}
-		return invoke("systemctl", "--user", a, unit)
+		return output.invoke("systemctl", "--user", a, unit)
 	case "launchd":
 		target := domain() + "/" + label
 		switch a {
 		case "start":
-			if exec.Command("launchctl", "print", target).Run() == nil {
+			if exec.CommandContext(output.ctx, "launchctl", "print", target).Run() == nil {
 				return nil
 			}
-			return invoke("launchctl", "bootstrap", domain(), plistPath())
+			return output.invoke("launchctl", "bootstrap", domain(), plistPath())
 		case "stop":
-			if exec.Command("launchctl", "print", target).Run() != nil {
+			if exec.CommandContext(output.ctx, "launchctl", "print", target).Run() != nil {
 				return nil
 			}
-			return invoke("launchctl", "bootout", target)
+			return output.invoke("launchctl", "bootout", target)
 		case "restart":
-			if err := action(dir, c, "stop"); err != nil {
+			if err := output.action(dir, c, "stop"); err != nil {
 				return err
 			}
-			return action(dir, c, "start")
+			return output.action(dir, c, "start")
 		case "status":
-			return invoke("launchctl", "print", target)
+			return output.invoke("launchctl", "print", target)
 		case "uninstall":
-			if err := action(dir, c, "stop"); err != nil {
+			if err := output.action(dir, c, "stop"); err != nil {
 				return err
 			}
 			if err := os.Remove(plistPath()); err != nil && !os.IsNotExist(err) {
@@ -280,14 +312,14 @@ func action(dir string, c config, a string) error {
 	case "native":
 		switch a {
 		case "start":
-			return startNative(dir, c)
+			return output.startNative(dir, c)
 		case "stop":
 			return stopNative(dir)
 		case "restart":
 			if err := stopNative(dir); err != nil {
 				return err
 			}
-			return startNative(dir, c)
+			return output.startNative(dir, c)
 		case "status":
 			s, err := request(dir, "status")
 			if err != nil {
@@ -328,13 +360,22 @@ func showLog(dir string) error {
 	return err
 }
 func request(dir, command string) (status, error) {
+	return requestContext(context.Background(), dir, command)
+}
+
+func requestContext(ctx context.Context, dir, command string) (status, error) {
 	var s status
-	conn, err := net.DialTimeout("unix", sockPath(dir), time.Second)
+	dialer := net.Dialer{Timeout: time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", sockPath(dir))
 	if err != nil {
 		return s, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	deadline := time.Now().Add(2 * time.Second)
+	if limit, ok := ctx.Deadline(); ok && limit.Before(deadline) {
+		deadline = limit
+	}
+	_ = conn.SetDeadline(deadline)
 	if err = json.NewEncoder(conn).Encode(command); err != nil {
 		return s, err
 	}
@@ -344,38 +385,46 @@ func request(dir, command string) (status, error) {
 func stopped(err error) bool {
 	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }
-func startNative(dir string, c config) error {
-	if s, err := request(dir, "status"); err == nil {
-		if s.ChildPID == 0 {
-			return errors.New("supervisor running, server restarting; see service logs")
-		}
+func (output commandIO) startNative(dir string, c config) error {
+	ctx, cancel := context.WithTimeout(output.ctx, 10*time.Second)
+	defer cancel()
+	s, err := requestContext(ctx, dir, "status")
+	if err == nil && s.ChildPID != 0 {
 		return nil
-	} else if !stopped(err) {
+	}
+	if stopped(err) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		log, err := os.OpenFile(logPath(dir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return err
+		}
+		defer log.Close()
+		cmd := exec.Command(c.Executable, "service", "supervise")
+		cmd.Dir = c.CWD
+		cmd.Stdout, cmd.Stderr = log, log
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err = cmd.Start(); err != nil {
+			return err
+		}
+		_ = cmd.Process.Release()
+	} else if err != nil {
 		return err
 	}
-	log, err := os.OpenFile(logPath(dir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	defer log.Close()
-	cmd := exec.Command(c.Executable, "service", "supervise")
-	cmd.Dir = c.CWD
-	cmd.Stdout, cmd.Stderr = log, log
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err = cmd.Start(); err != nil {
-		return err
-	}
-	_ = cmd.Process.Release()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if s, e := request(dir, "status"); e == nil && s.ChildPID != 0 {
-			time.Sleep(500 * time.Millisecond)
-			if next, e := request(dir, "status"); e == nil && next.ChildPID == s.ChildPID {
-				fmt.Printf("ServerSide service started (pid %d)\n", s.ChildPID)
+	for ctx.Err() == nil {
+		if s, e := requestContext(ctx, dir, "status"); e == nil && s.ChildPID != 0 {
+			if err := pause(ctx, 500*time.Millisecond); err != nil {
+				break
+			}
+			if next, e := requestContext(ctx, dir, "status"); e == nil && next.ChildPID == s.ChildPID {
+				fmt.Fprintf(output.out, "Generative service started (pid %d)\n", s.ChildPID)
 				return nil
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		if err := pause(ctx, 100*time.Millisecond); err != nil {
+			break
+		}
 	}
 	return errors.New("server did not stabilize; run service logs or service stop")
 }

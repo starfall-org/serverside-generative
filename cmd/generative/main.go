@@ -83,12 +83,7 @@ func defaultDataSocket() string {
 }
 
 // bridgeStream copies binary frames without writing diagnostics to stdout.
-func bridgeStream(socketPath string, input io.Reader, output io.Writer) error {
-	conn, err := node.DialDataSocket(socketPath)
-	if err != nil {
-		return fmt.Errorf("server_unavailable: daemon data socket unavailable")
-	}
-	defer conn.Close()
+func bridgeStream(conn net.Conn, input io.Reader, output io.Writer) error {
 	fromClient := make(chan error, 1)
 	fromServer := make(chan error, 1)
 	go func() {
@@ -108,6 +103,31 @@ func bridgeStream(socketPath string, input io.Reader, output io.Writer) error {
 		}
 		return <-fromServer
 	}
+}
+
+func connectStdio(fs *flag.FlagSet, flagName, path, alternate string, dial func(context.Context, string) (net.Conn, error)) (net.Conn, error) {
+	custom := false
+	fs.Visit(func(f *flag.Flag) {
+		custom = custom || f.Name == flagName
+	})
+	if custom {
+		return dial(context.Background(), path)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return service.Connect(ctx, path, alternate, dial)
+}
+
+func dialPairSocket(ctx context.Context, path string) (net.Conn, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return nil, fmt.Errorf("control socket path is not a socket: %s", path)
+	}
+	dialer := net.Dialer{Timeout: 3 * time.Second}
+	return dialer.DialContext(ctx, "unix", path)
 }
 func printHuman(h node.HumanInvitation) {
 	fmt.Println("\n=== Human Relay (2-minute one-time pairing) ===")
@@ -145,7 +165,12 @@ func run(args []string) error {
 				return err
 			}
 		}
-		return bridgeStream(*path, os.Stdin, os.Stdout)
+		conn, err := connectStdio(fs, "data-socket", *path, defaultIPC(), node.DialDataSocketContext)
+		if err != nil {
+			return fmt.Errorf("server_unavailable: daemon data socket unavailable: %w", err)
+		}
+		defer conn.Close()
+		return bridgeStream(conn, os.Stdin, os.Stdout)
 	case "manage":
 		return runManage(args[1:], os.Stdin, os.Stdout)
 	case "version":
@@ -207,7 +232,19 @@ func run(args []string) error {
 				return err
 			}
 		}
-		raw, err := node.ControlRequestFields(*ipc, map[string]string{"method": method, "endpoint": *endpoint, "pin": *pin})
+		input := map[string]string{"method": method, "endpoint": *endpoint, "pin": *pin}
+		var raw json.RawMessage
+		var err error
+		if method == "pair_tcp" {
+			conn, e := connectStdio(fs, "ipc", *ipc, defaultDataSocket(), dialPairSocket)
+			if e != nil {
+				return fmt.Errorf("connect to running daemon: %w", e)
+			}
+			defer conn.Close()
+			raw, err = node.ExchangeControlRequest(conn, input)
+		} else {
+			raw, err = node.ControlRequestFields(*ipc, input)
+		}
 		if err != nil {
 			return err
 		}
@@ -962,6 +999,16 @@ func run(args []string) error {
 		if *password != "" && len(*password) < 12 && !strings.EqualFold(*httpAddr, "off") {
 			return fmt.Errorf("HTTP/WS password must be at least 12 characters")
 		}
+		if *dataDir == "" || *identityDir == "" {
+			if _, err := configdir.Root(); err != nil {
+				return err
+			}
+		}
+		lock, err := service.LockDaemon()
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
 		listener, err := net.Listen("tcp", *tcpAddr)
 		if err != nil {
 			return err
@@ -1008,32 +1055,39 @@ func run(args []string) error {
 		if err = secretStore.Close(); err != nil {
 			return err
 		}
-		sock := n.Config.IPCSocket
-		control, err := node.StartIPCSocket(sock)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = control.Close(); _ = os.Remove(sock) }()
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		go n.ServeIPC(ctx, control)
+		var httpListener net.Listener
+		if !strings.EqualFold(*httpAddr, "off") {
+			httpListener, err = net.Listen("tcp", *httpAddr)
+			if err != nil {
+				return err
+			}
+			defer httpListener.Close()
+		}
+		sock := n.Config.IPCSocket
+		var dataListener net.Listener
 		if node.DataSocketSupported() {
-			dataListener, err := node.StartDataSocket(n.Config.DataSocket)
+			dataListener, err = node.StartDataSocket(n.Config.DataSocket)
 			if err != nil {
 				return err
 			}
 			defer dataListener.Close()
-			go n.ServeDataSocket(ctx, dataListener)
 		} else if *dataSocket != "" {
 			return fmt.Errorf("data socket unsupported on this platform")
 		}
+		control, err := node.StartIPCSocket(sock)
+		if err != nil {
+			return err
+		}
+		defer control.Close()
+		if dataListener != nil {
+			go n.ServeDataSocket(ctx, dataListener)
+		}
+		go n.ServeIPC(ctx, control)
 		go n.ServeTCP(ctx, listener)
 		var httpSrv *http.Server
-		if !strings.EqualFold(*httpAddr, "off") {
-			httpListener, err := net.Listen("tcp", *httpAddr)
-			if err != nil {
-				return err
-			}
+		if httpListener != nil {
 			if warning := n.WebStartupWarning(httpListener.Addr().String()); warning != "" {
 				fmt.Fprintln(os.Stderr, warning)
 			}

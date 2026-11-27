@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -129,7 +130,7 @@ func (n *Node) ServeIPC(ctx context.Context, listener net.Listener) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
 			}
 			continue
@@ -236,11 +237,17 @@ func StartIPCSocket(path string) (net.Listener, error) {
 		return nil, err
 	}
 	// Do not unlink an active daemon's socket.
-	if _, err := os.Stat(path); err == nil {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("control socket path is not a socket: %s", path)
+		}
 		c, dialErr := net.DialTimeout("unix", path, 250*time.Millisecond)
 		if dialErr == nil {
 			_ = c.Close()
 			return nil, fmt.Errorf("daemon already running: %s", path)
+		}
+		if !errors.Is(dialErr, syscall.ECONNREFUSED) && !errors.Is(dialErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("cannot verify existing control socket: %w", dialErr)
 		}
 		if err = os.Remove(path); err != nil {
 			return nil, err
@@ -277,16 +284,21 @@ func ControlRequestFields(path string, input map[string]string) (json.RawMessage
 	if web && DataSocketSupported() && !authorizedLocalPeer(conn) {
 		return nil, errors.New("control socket peer mismatch")
 	}
+	return ExchangeControlRequest(conn, input)
+}
+
+// ExchangeControlRequest sends a single request on an established connection.
+func ExchangeControlRequest(conn net.Conn, input map[string]string) (json.RawMessage, error) {
 	_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
-	if err = json.NewEncoder(conn).Encode(input); err != nil {
+	if err := json.NewEncoder(conn).Encode(input); err != nil {
 		return nil, err
 	}
 	var result json.RawMessage
-	if err = json.NewDecoder(conn).Decode(&result); err != nil {
+	if err := json.NewDecoder(conn).Decode(&result); err != nil {
 		return nil, err
 	}
 	var check map[string]any
-	if err = json.Unmarshal(result, &check); err != nil {
+	if err := json.Unmarshal(result, &check); err != nil {
 		return nil, err
 	}
 	if e, ok := check["error"].(string); ok {

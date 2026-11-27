@@ -149,6 +149,10 @@ func (n *Node) handleLocalV5(conn net.Conn) {
 
 // DialDataSocket refuses symlinks, nonprivate socket paths and other local users.
 func DialDataSocket(path string) (net.Conn, error) {
+	return DialDataSocketContext(context.Background(), path)
+}
+
+func DialDataSocketContext(ctx context.Context, path string) (net.Conn, error) {
 	if err := validateDataSocketDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
@@ -162,7 +166,8 @@ func DialDataSocket(path string) (net.Conn, error) {
 	if err = validateDataSocketOwner(info); err != nil {
 		return nil, err
 	}
-	c, err := net.DialTimeout("unix", path, 3*time.Second)
+	dialer := net.Dialer{Timeout: 3 * time.Second}
+	c, err := dialer.DialContext(ctx, "unix", path)
 	if err != nil {
 		return nil, err
 	}

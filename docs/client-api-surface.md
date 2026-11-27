@@ -89,6 +89,8 @@ The server displays `https://host/connect#code=...&pin=sha256%2F...&v=1` as full
 
 **TCP is enrolled only via authenticated SSH**, e.g. `ssh -T USER@HOST generative pair --stdio --transport tcp`. The resulting identity can use TCP or the SSH stdio fallback, but not HTTP/WS without explicit separate pairing. An HTTP/WS URL-paired identity cannot be used to enroll a TCP client.
 
+Once the CLI is installed, run `generative pair --stdio --transport tcp` and `generative stream --stdio` directly over SSH. On Linux and macOS, each command waits for its default Unix socket and starts the existing user service if needed. When no daemon or service is present, it registers the service with default settings. An explicit `--ipc` or `--data-socket` connects to that socket only. Startup diagnostics go to stderr. Pairing stdout contains one JSON response, and stream stdout carries framed v5 messages. Automatic connection retries happen before any request is sent.
+
 SSH stdio defaults to cursor polling with `session.events` and never injects unsolicited events when `session.open` omits `after`. To request push delivery over SSH, explicitly supply an `after` cursor in `session.open` or `session.open_chunked`. TCP and WebSocket continue to support push on both open operations.
 
 ## 4. Canonical RPC and automatic conversation delivery

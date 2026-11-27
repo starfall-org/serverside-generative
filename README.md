@@ -68,10 +68,9 @@ Install the **latest published GitHub Release**, including pre-releases, on Linu
 ```sh
 curl -fsSLo install-generative.sh https://raw.githubusercontent.com/starfall-org/serverside-generative/main/install.sh
 sh install-generative.sh
-generative version
 ```
 
-The installer selects the binary for your OS/CPU, verifies it against the release's `SHA256SUMS` manifest, and atomically installs `generative` into a user-writable directory on your existing `PATH`. If none is available, it uses `~/.local/bin` and adds that directory to your login shell's `PATH` configuration (open a new shell afterward). **No `sudo` is invoked automatically.** It requires `curl`, `python3` and `sha256sum` or `shasum`. Review the downloaded script before executing it. To pin a particular release, set `SERVERSIDE_TAG=v0.5.0-alpha` when running the script; to choose a destination, set `INSTALL_DIR=/absolute/path` (which must be writable).
+The installer selects the binary for your OS/CPU, verifies it against the release's `SHA256SUMS` manifest, atomically installs `generative`, and installs and starts the user service. It prefers a writable directory on your existing `PATH`. Otherwise it uses `~/.local/bin` and adds it to your login shell's `PATH` configuration (open a new shell afterward). **No `sudo` is invoked automatically.** It requires `curl`, `python3` and `sha256sum` or `shasum`. Review the downloaded script before executing it. To pin a particular release, set `SERVERSIDE_TAG=v0.5.0-alpha` when running the script. Set `INSTALL_DIR=/absolute/path` to use a different writable directory.
 
 To build from source instead, install Go 1.26.10+ and run:
 
@@ -81,6 +80,8 @@ go build -trimpath -ldflags='-s -w' -o generative ./cmd/generative
 ```
 
 ### Run as a managed service
+
+The service commands below are for administration. Android can run the SSH pairing and stream commands directly once the CLI is installed.
 
 ```sh
 generative service install -- --tcp-listen 127.0.0.1:7090 --http-listen 127.0.0.1:7091
@@ -114,8 +115,8 @@ data. Reinstall to change persistent serve flags.
 - Linux with an active user Systemd manager: installs and enables a unit with
   automatic restart. To start at machine boot even before login, enable user
   lingering with `loginctl enable-linger "$USER"` where supported.
-- macOS: installs a LaunchAgent with RunAtLoad and KeepAlive, starting at login.
-- Other Linux environments: the built-in native supervisor detaches from the
+- macOS with a user GUI session: installs a LaunchAgent with RunAtLoad and KeepAlive, starting at login.
+- Other Linux and macOS environments: the built-in native supervisor detaches from the
   terminal and restarts the server on exit, without external dependencies.
   For a full machine reboot, configure the host's startup hook to invoke
   `generative service start`. No process can survive destruction of its host.
@@ -150,7 +151,9 @@ It emits one JSON object containing `client_id`, `secret`, `fingerprint`, `endpo
 ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes USER@HOST generative stream --stdio
 ```
 
-Use `--data-socket PATH` for a non-default daemon socket. Never allocate a PTY or pass client secrets in SSH argv. Only trusted SSH users should be able to run the pairing command. TCP pairing **does not** use a QR, HTTP request or PIN.
+On Linux and macOS, both commands use the running daemon when its default socket is available. If needed, the CLI starts the registered service with its existing settings. If there is no registered service and no daemon running, it registers and starts the default per-user service. Concurrent clients share one server process with the web workspace. Startup waits for the requested socket within a 15-second startup budget. The service manager sends startup messages to stderr, leaving stdout for the pairing JSON or v5 binary frames.
+
+Pass `--ipc PATH` to `pair` or `--data-socket PATH` to `stream` for a custom socket. With either flag the CLI connects directly to that path and returns a connection error if it is unavailable. The CLI only retries connecting before it sends pairing or protocol data. Never allocate a PTY or pass client secrets in SSH argv. Only trusted SSH users should be able to run the pairing command. TCP pairing uses the SSH connection to enroll the device.
 
 ### One URL for HTTP and WebSocket pairing
 
